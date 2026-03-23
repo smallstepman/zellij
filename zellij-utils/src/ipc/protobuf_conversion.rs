@@ -777,7 +777,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
     }
 }
 
-// Complete Action conversion implementation - all 91 variants
+// Complete Action conversion implementation - all 93 variants
 impl From<crate::input::actions::Action>
     for crate::client_server_contract::client_server_contract::Action
 {
@@ -834,6 +834,7 @@ impl From<crate::input::actions::Action>
             MovePaneBackwardsAction,
             MovePaneBackwardsByPaneIdAction,
             MovePaneByPaneIdAction,
+            MovePaneToTabAction,
             MoveTabAction,
             MoveTabByTabIdAction,
             NewBlockingPaneAction,
@@ -1711,6 +1712,15 @@ impl From<crate::input::actions::Action>
                     direction: direction_to_proto_i32(direction),
                 })
             },
+            crate::input::actions::Action::MovePaneToTab {
+                pane_id,
+                tab_id,
+                new_tab_name,
+            } => ActionType::MovePaneToTab(MovePaneToTabAction {
+                pane_id: pane_id.map(|p| p.into()),
+                tab_id: tab_id.map(|id| id as u64),
+                new_tab_name,
+            }),
         };
 
         Self {
@@ -2616,6 +2626,11 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     direction,
                 })
             },
+            ActionType::MovePaneToTab(a) => Ok(crate::input::actions::Action::MovePaneToTab {
+                pane_id: a.pane_id.map(|p| p.try_into()).transpose()?,
+                tab_id: a.tab_id.map(|id| id as usize),
+                new_tab_name: a.new_tab_name,
+            }),
         }
     }
 }

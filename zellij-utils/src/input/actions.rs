@@ -172,6 +172,11 @@ pub enum Action {
         direction: Option<Direction>,
     },
     MovePaneBackwards,
+    MovePaneToTab {
+        pane_id: Option<PaneId>,
+        tab_id: Option<usize>,
+        new_tab_name: Option<String>,
+    },
     /// Clear all buffers of a current screen
     ClearScreen,
     /// Dumps the screen to a file or STDOUT
@@ -819,6 +824,24 @@ impl Action {
                     Ok(vec![Action::MovePaneBackwardsByPaneId { pane_id }])
                 },
                 None => Ok(vec![Action::MovePaneBackwards]),
+            },
+            CliAction::MovePaneToTab {
+                new_tab,
+                tab_id,
+                name,
+                pane_id,
+            } => {
+                let pane_id = match pane_id {
+                    Some(pane_id_str) => Some(PaneId::from_str(&pane_id_str).map_err(|_| format!(
+                        "Malformed pane id: {pane_id_str}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)"
+                    ))?),
+                    None => None,
+                };
+                Ok(vec![Action::MovePaneToTab {
+                    pane_id,
+                    tab_id: if new_tab { None } else { tab_id },
+                    new_tab_name: name,
+                }])
             },
             CliAction::MoveTab { direction, tab_id } => match tab_id {
                 Some(id) => Ok(vec![Action::MoveTabByTabId {
@@ -3018,6 +3041,32 @@ mod tests {
                 assert!(matches!(direction, Direction::Right));
             },
             _ => panic!("Expected MoveTab action"),
+        }
+    }
+
+    #[test]
+    fn test_move_pane_to_new_tab_with_name_and_pane_id() {
+        let cli_action = CliAction::MovePaneToTab {
+            new_tab: true,
+            tab_id: None,
+            name: Some("scratch".to_string()),
+            pane_id: Some("terminal_7".to_string()),
+        };
+        let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
+        assert!(result.is_ok());
+        let actions = result.unwrap();
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::MovePaneToTab {
+                pane_id,
+                tab_id,
+                new_tab_name,
+            } => {
+                assert_eq!(*pane_id, Some(PaneId::Terminal(7)));
+                assert_eq!(*tab_id, None);
+                assert_eq!(new_tab_name.as_deref(), Some("scratch"));
+            },
+            _ => panic!("Expected MovePaneToTab action"),
         }
     }
 
