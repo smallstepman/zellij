@@ -29,6 +29,7 @@ pub struct SessionTransferRequest {
     pub new_session: bool,
     pub target_session_name: String,
     pub target_tab_id: Option<usize>,
+    pub source_tab_id: Option<usize>,
     pub panes: Vec<TransferredPane>,
 }
 
@@ -282,6 +283,7 @@ mod tests {
             new_session: true,
             target_session_name: "test-session".to_string(),
             target_tab_id: Some(7),
+            source_tab_id: Some(3),
             panes: vec![TransferredPane {
                 pane_info: PaneInfo::default(),
                 invoked_with: None,

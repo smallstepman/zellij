@@ -87,7 +87,7 @@ use crate::{
     plugins::{DumpSessionLayoutResponse, PluginId, PluginInstruction, PluginRenderAsset},
     pty::{get_default_shell, ClientTabIndexOrPaneId, PtyInstruction, VteBytes},
     tab::{pane_info_for_pane, SuppressedPanes, Tab},
-    thread_bus::Bus,
+    thread_bus::{Bus, ThreadSenders},
     ui::loading_indication::LoadingIndication,
     ClientId, ServerInstruction,
 };
@@ -387,6 +387,9 @@ pub enum ScreenInstruction {
         (ClientId, bool),                                // bool -> is_web_client
         Option<NotificationEnd>,                         // completion signal
     ),
+    CreateTabForTransfer {
+        completion_tx: Option<NotificationEnd>,
+    },
     /// Apply layout to tab with given stable ID.
     ///
     /// The sixth parameter (usize) is a stable identifier (not position) from the
@@ -423,6 +426,7 @@ pub enum ScreenInstruction {
     MoveTabRight(ClientId, Option<NotificationEnd>),
     GoToTabWithId(usize, Option<ClientId>, Option<NotificationEnd>),
     CloseTabWithId(usize, Option<NotificationEnd>),
+    CloseTabWithoutPty(usize, Option<NotificationEnd>),
     RenameTabWithId(usize, Vec<u8>, Option<NotificationEnd>),
     BreakPanesToTabWithId {
         pane_ids: Vec<PaneId>,
@@ -435,6 +439,12 @@ pub enum ScreenInstruction {
         pane_id: PaneId,
         target_session_name: String,
         target_tab_id: Option<usize>,
+        new_session: bool,
+        client_id: ClientId,
+        completion_tx: Option<NotificationEnd>,
+    },
+    MoveTabToSession {
+        target_session_name: String,
         new_session: bool,
         client_id: ClientId,
         completion_tx: Option<NotificationEnd>,
@@ -843,6 +853,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::UpdatePaneName(..) => ScreenContext::UpdatePaneName,
             ScreenInstruction::UndoRenamePane(..) => ScreenContext::UndoRenamePane,
             ScreenInstruction::NewTab(..) => ScreenContext::NewTab,
+            ScreenInstruction::CreateTabForTransfer { .. } => ScreenContext::CreateTabForTransfer,
             ScreenInstruction::ApplyLayout(..) => ScreenContext::ApplyLayout,
             ScreenInstruction::SwitchTabNext(..) => ScreenContext::SwitchTabNext,
             ScreenInstruction::SwitchTabPrev(..) => ScreenContext::SwitchTabPrev,
@@ -855,9 +866,11 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::MoveTabRight(..) => ScreenContext::MoveTabRight,
             ScreenInstruction::GoToTabWithId(..) => ScreenContext::GoToTabWithId,
             ScreenInstruction::CloseTabWithId(..) => ScreenContext::CloseTabWithId,
+            ScreenInstruction::CloseTabWithoutPty(..) => ScreenContext::CloseTabWithoutPty,
             ScreenInstruction::RenameTabWithId(..) => ScreenContext::RenameTabWithId,
             ScreenInstruction::BreakPanesToTabWithId { .. } => ScreenContext::BreakPanesToTabWithId,
             ScreenInstruction::MovePaneToSession { .. } => ScreenContext::MovePaneToSession,
+            ScreenInstruction::MoveTabToSession { .. } => ScreenContext::MoveTabToSession,
             ScreenInstruction::TerminalResize(..) => ScreenContext::TerminalResize,
             ScreenInstruction::TerminalPixelDimensions(..) => {
                 ScreenContext::TerminalPixelDimensions
@@ -1733,7 +1746,7 @@ impl Screen {
         self.switch_active_tab_name(name, client_id)
     }
 
-    fn close_tab_by_id(&mut self, tab_id: usize) -> Result<()> {
+    fn close_tab_by_id_internal(&mut self, tab_id: usize, close_panes_in_pty: bool) -> Result<()> {
         let err_context = || format!("failed to close tab at index {tab_id:?}");
 
         let mut tab_to_close = self.tabs.remove(&tab_id).with_context(err_context)?;
@@ -1763,10 +1776,12 @@ impl Screen {
         // below we don't check the result of sending the CloseTab instruction to the pty thread
         // because this might be happening when the app is closing, at which point the pty thread
         // has already closed and this would result in an error
-        self.bus
-            .senders
-            .send_to_pty(PtyInstruction::CloseTab(pane_ids))
-            .with_context(err_context)?;
+        if close_panes_in_pty {
+            self.bus
+                .senders
+                .send_to_pty(PtyInstruction::CloseTab(pane_ids))
+                .with_context(err_context)?;
+        }
         if self.tabs.is_empty() {
             self.active_tab_ids.clear();
             self.bus
@@ -1794,6 +1809,14 @@ impl Screen {
                 .with_context(err_context)?;
             self.render(None).with_context(err_context)
         }
+    }
+
+    fn close_tab_by_id(&mut self, tab_id: usize) -> Result<()> {
+        self.close_tab_by_id_internal(tab_id, true)
+    }
+
+    fn close_tab_without_pty_by_id(&mut self, tab_id: usize) -> Result<()> {
+        self.close_tab_by_id_internal(tab_id, false)
     }
 
     // Closes the client_id's focused tab
@@ -4728,6 +4751,121 @@ fn find_already_running_panes(
     (tiled_to_ignore, floating_indices)
 }
 
+#[cfg(unix)]
+fn start_session_transfer_listener(
+    session_transfer_listener_started: &mut bool,
+    session_name: String,
+    senders: ThreadSenders,
+    destination_client_id: ClientId,
+    destination_is_web_client: bool,
+) {
+    if *session_transfer_listener_started || session_name.is_empty() {
+        return;
+    }
+    *session_transfer_listener_started = true;
+    std::thread::spawn(move || {
+        let listener = match bind_session_transfer_socket(&session_name) {
+            Ok(listener) => listener,
+            Err(err) => {
+                log::error!(
+                    "Failed to bind session transfer socket for {}: {}",
+                    session_name,
+                    err
+                );
+                return;
+            },
+        };
+
+        for incoming in listener.incoming() {
+            let mut stream = match incoming {
+                Ok(stream) => stream,
+                Err(err) => {
+                    log::error!(
+                        "Failed to accept session transfer connection for {}: {}",
+                        session_name,
+                        err
+                    );
+                    continue;
+                },
+            };
+
+            let (request, raw_fds) = match recv_request_with_fds(&stream) {
+                Ok(request) => request,
+                Err(err) => {
+                    let _ = send_response(
+                        &mut stream,
+                        &SessionTransferResponse {
+                            success: false,
+                            error: Some(err.to_string()),
+                        },
+                    );
+                    log::error!(
+                        "Failed to decode session transfer request for {}: {}",
+                        session_name,
+                        err
+                    );
+                    continue;
+                },
+            };
+
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+            if let Err(err) = senders.send_to_pty(PtyInstruction::AdoptTransferredPanes {
+                destination_client_id,
+                destination_is_web_client,
+                request,
+                raw_fds,
+                completion_tx: Some(NotificationEnd::new(completion_tx)),
+            }) {
+                let _ = send_response(
+                    &mut stream,
+                    &SessionTransferResponse {
+                        success: false,
+                        error: Some(err.to_string()),
+                    },
+                );
+                log::error!(
+                    "Failed to queue transferred panes for {}: {}",
+                    session_name,
+                    err
+                );
+                continue;
+            }
+
+            let completion =
+                wait_for_action_completion(completion_rx, "adopt transferred panes", true);
+            let response = SessionTransferResponse {
+                success: completion.exit_status.unwrap_or(0) == 0
+                    && completion.error_message.is_none(),
+                error: completion.error_message,
+            };
+            if let Err(err) = send_response(&mut stream, &response) {
+                log::error!(
+                    "Failed to send session transfer response for {}: {}",
+                    session_name,
+                    err
+                );
+            }
+        }
+    });
+}
+
+pub(crate) fn filter_live_terminal_panes_for_session_transfer(
+    mut transferred_panes: Vec<TransferredPane>,
+) -> Vec<TransferredPane> {
+    transferred_panes.retain(|pane| {
+        !pane.pane_info.is_plugin
+            && !pane.pane_info.is_suppressed
+            && !pane.pane_info.exited
+            && !pane.pane_info.is_held
+    });
+    if !transferred_panes.iter().any(|pane| pane.pane_info.is_focused) {
+        if let Some(first_live_terminal) = transferred_panes.first_mut() {
+            first_live_terminal.pane_info.is_focused = true;
+        }
+    }
+    transferred_panes
+}
+
 // The box is here in order to make the
 // NewClient enum smaller
 #[allow(clippy::boxed_local)]
@@ -6098,6 +6236,16 @@ pub(crate) fn screen_thread_main(
                     tab_name.clone(),
                     client_id_for_new_tab,
                 )?;
+                #[cfg(unix)]
+                if !session_transfer_listener_started {
+                    start_session_transfer_listener(
+                        &mut session_transfer_listener_started,
+                        screen.session_name.clone(),
+                        screen.bus.senders.clone(),
+                        client_id,
+                        is_web_client,
+                    );
+                }
                 screen
                     .bus
                     .senders
@@ -6113,6 +6261,15 @@ pub(crate) fn screen_thread_main(
                         (client_id, is_web_client),
                         completion_tx,
                     ))?;
+            },
+            ScreenInstruction::CreateTabForTransfer { mut completion_tx } => {
+                let tab_id = screen.get_new_tab_id();
+                screen.new_tab(tab_id, (vec![], vec![]), None, None)?;
+                completion_tx
+                    .as_mut()
+                    .map(|c| c.set_affected_tab_id(tab_id));
+                screen.log_and_report_session_state()?;
+                screen.render(None)?;
             },
             ScreenInstruction::ApplyLayout(
                 layout,
@@ -6440,102 +6597,13 @@ pub(crate) fn screen_thread_main(
                 screen.add_client(client_id, is_web_client)?;
                 #[cfg(unix)]
                 if !session_transfer_listener_started {
-                    session_transfer_listener_started = true;
-                    let session_name = screen.session_name.clone();
-                    let senders = screen.bus.senders.clone();
-                    let destination_client_id = client_id;
-                    let destination_is_web_client = is_web_client;
-                    std::thread::spawn(move || {
-                        if session_name.is_empty() {
-                            return;
-                        }
-
-                        let listener = match bind_session_transfer_socket(&session_name) {
-                            Ok(listener) => listener,
-                            Err(err) => {
-                                log::error!(
-                                    "Failed to bind session transfer socket for {}: {}",
-                                    session_name,
-                                    err
-                                );
-                                return;
-                            },
-                        };
-
-                        for incoming in listener.incoming() {
-                            let mut stream = match incoming {
-                                Ok(stream) => stream,
-                                Err(err) => {
-                                    log::error!(
-                                        "Failed to accept session transfer connection for {}: {}",
-                                        session_name,
-                                        err
-                                    );
-                                    continue;
-                                },
-                            };
-
-                            let (request, raw_fds) = match recv_request_with_fds(&stream) {
-                                Ok(request) => request,
-                                Err(err) => {
-                                    let _ = send_response(
-                                        &mut stream,
-                                        &SessionTransferResponse {
-                                            success: false,
-                                            error: Some(err.to_string()),
-                                        },
-                                    );
-                                    log::error!(
-                                        "Failed to decode session transfer request for {}: {}",
-                                        session_name,
-                                        err
-                                    );
-                                    continue;
-                                },
-                            };
-
-                            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-                            if let Err(err) = senders.send_to_pty(PtyInstruction::AdoptTransferredPanes {
-                                destination_client_id,
-                                destination_is_web_client,
-                                request,
-                                raw_fds,
-                                completion_tx: Some(NotificationEnd::new(completion_tx)),
-                            }) {
-                                let _ = send_response(
-                                    &mut stream,
-                                    &SessionTransferResponse {
-                                        success: false,
-                                        error: Some(err.to_string()),
-                                    },
-                                );
-                                log::error!(
-                                    "Failed to queue transferred panes for {}: {}",
-                                    session_name,
-                                    err
-                                );
-                                continue;
-                            }
-
-                            let completion = wait_for_action_completion(
-                                completion_rx,
-                                "adopt transferred panes",
-                                true,
-                            );
-                            let response = SessionTransferResponse {
-                                success: completion.exit_status.unwrap_or(0) == 0
-                                    && completion.error_message.is_none(),
-                                error: completion.error_message,
-                            };
-                            if let Err(err) = send_response(&mut stream, &response) {
-                                log::error!(
-                                    "Failed to send session transfer response for {}: {}",
-                                    session_name,
-                                    err
-                                );
-                            }
-                        }
-                    });
+                    start_session_transfer_listener(
+                        &mut session_transfer_listener_started,
+                        screen.session_name.clone(),
+                        screen.bus.senders.clone(),
+                        client_id,
+                        is_web_client,
+                    );
                 }
                 let pane_id = pane_id_to_focus.map(|(pane_id, is_plugin)| {
                     if is_plugin {
@@ -7550,6 +7618,13 @@ pub(crate) fn screen_thread_main(
                     log::error!("Failed to find tab with ID: {}", tab_id);
                 }
             },
+            ScreenInstruction::CloseTabWithoutPty(tab_id, _completion_tx) => {
+                if screen.get_tab_by_id(tab_id).is_some() {
+                    screen.close_tab_without_pty_by_id(tab_id).non_fatal();
+                } else {
+                    log::error!("Failed to find tab with ID: {}", tab_id);
+                }
+            },
             ScreenInstruction::BreakPanesToTabWithId {
                 pane_ids,
                 tab_id,
@@ -7644,6 +7719,7 @@ pub(crate) fn screen_thread_main(
                     new_session,
                     target_session_name,
                     target_tab_id,
+                    source_tab_id: None,
                     panes: vec![transferred_pane],
                 };
                 screen
@@ -7654,6 +7730,95 @@ pub(crate) fn screen_thread_main(
                         completion_tx,
                     ))
                     .with_context(|| "failed to start pane transfer".to_string())?;
+            },
+            ScreenInstruction::MoveTabToSession {
+                target_session_name,
+                new_session,
+                client_id,
+                mut completion_tx,
+            } => {
+                let source_client_id = if screen.active_tab_ids.contains_key(&client_id) {
+                    Some(client_id)
+                } else {
+                    screen.get_first_client_id()
+                };
+                let source_tab_id = source_client_id
+                    .and_then(|client_id| screen.active_tab_ids.get(&client_id).copied())
+                    .or_else(|| {
+                        if screen.tabs.contains_key(&screen.global_last_active_tab_id) {
+                            Some(screen.global_last_active_tab_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        if screen.tabs.contains_key(&0) {
+                            Some(0)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| screen.tabs.keys().next().copied());
+                let focused_pane_id = source_client_id
+                    .and_then(|client_id| screen.get_active_tab(client_id).ok().and_then(|tab| tab.get_active_pane_id(client_id)));
+                let empty_pane_group: HashMap<ClientId, Vec<PaneId>> = HashMap::new();
+                let transferred_panes = {
+                    let active_tab = match source_tab_id.and_then(|tab_id| screen.get_tab_by_id_mut(tab_id)) {
+                        Some(tab) => tab,
+                        None => {
+                            if let Some(completion_tx) = completion_tx.as_mut() {
+                                completion_tx.set_exit_status(1);
+                                completion_tx.set_error_message(
+                                    "Failed to find active tab".to_string(),
+                                );
+                            }
+                            return Ok(());
+                        },
+                    };
+                    let mut transferred_panes = vec![];
+                    for pane_id in active_tab.get_all_pane_ids() {
+                        if let Some(pane) = active_tab.get_pane_with_id_mut(pane_id) {
+                            let mut pane_info =
+                                pane_info_for_pane(&pane_id, &*pane, &empty_pane_group);
+                            pane_info.is_focused = Some(pane_id) == focused_pane_id;
+                            transferred_panes.push(TransferredPane {
+                                pane_info,
+                                invoked_with: pane.invoked_with().clone(),
+                                pane_contents: pane.pane_contents_with_ansi(None, true, None),
+                                child_pid: None,
+                            });
+                        }
+                    }
+                    filter_live_terminal_panes_for_session_transfer(transferred_panes)
+                };
+
+                if transferred_panes.is_empty() {
+                    if let Some(completion_tx) = completion_tx.as_mut() {
+                        completion_tx.set_exit_status(1);
+                        completion_tx.set_error_message(
+                            "Only live terminal panes can be transferred between sessions"
+                                .to_string(),
+                        );
+                    }
+                    return Ok(());
+                }
+
+                let request = SessionTransferRequest {
+                    transfer_kind: TransferKind::Tab,
+                    new_session,
+                    target_session_name,
+                    target_tab_id: None,
+                    source_tab_id,
+                    panes: transferred_panes,
+                };
+                screen
+                    .bus
+                    .senders
+                    .send_to_pty(PtyInstruction::TransferPanesToSession(
+                        request,
+                        completion_tx,
+                    ))
+                    .with_context(|| "failed to start tab transfer".to_string())?;
             },
             ScreenInstruction::RequestPluginPermissions(plugin_id, plugin_permission) => {
                 let all_tabs = screen.get_tabs_mut();

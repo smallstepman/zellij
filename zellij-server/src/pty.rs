@@ -897,21 +897,40 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                         return Err(anyhow::anyhow!(error_message)).with_context(err_context);
                     }
 
-                    let mut completion_tx = completion_tx;
-                    for (index, pane) in request.panes.iter().enumerate() {
+                    for pane in request.panes.iter() {
                         pty.detach_terminal_pane(pane.pane_info.id)
                             .with_context(err_context)?;
-                        let is_last = index == request.panes.len() - 1;
-                        let completion = if is_last { completion_tx.take() } else { None };
+                    }
+
+                    if request.transfer_kind == TransferKind::Tab {
+                        let source_tab_id = request
+                            .source_tab_id
+                            .context("missing source tab id for transferred tab")
+                            .with_context(err_context)?;
                         pty.bus
                             .senders
-                            .send_to_screen(crate::screen::ScreenInstruction::ClosePaneWithoutPty(
-                                PaneId::Terminal(pane.pane_info.id),
-                                None,
-                                completion,
-                                None,
+                            .send_to_screen(crate::screen::ScreenInstruction::CloseTabWithoutPty(
+                                source_tab_id,
+                                completion_tx,
                             ))
                             .with_context(err_context)?;
+                    } else {
+                        let mut completion_tx = completion_tx;
+                        for (index, pane) in request.panes.iter().enumerate() {
+                            let is_last = index == request.panes.len() - 1;
+                            let completion = if is_last { completion_tx.take() } else { None };
+                            pty.bus
+                                .senders
+                                .send_to_screen(
+                                    crate::screen::ScreenInstruction::ClosePaneWithoutPty(
+                                        PaneId::Terminal(pane.pane_info.id),
+                                        None,
+                                        completion,
+                                        None,
+                                    ),
+                                )
+                                .with_context(err_context)?;
+                        }
                     }
                 }
                 #[cfg(not(unix))]
@@ -1949,7 +1968,7 @@ impl Pty {
     fn adopt_transferred_panes(
         &mut self,
         destination_client_id: ClientId,
-        destination_is_web_client: bool,
+        _destination_is_web_client: bool,
         request: SessionTransferRequest,
         raw_fds: Vec<i32>,
         completion_tx: Option<NotificationEnd>,
@@ -1978,41 +1997,30 @@ impl Pty {
             .with_context(err_context);
         }
 
+        let mut destination_tab_id = request.target_tab_id;
         if request.transfer_kind == TransferKind::Tab {
             if !request.new_session {
                 let (completion_tx_for_new_tab, completion_rx_for_new_tab) =
                     tokio::sync::oneshot::channel();
                 self.bus
                     .senders
-                    .send_to_screen(ScreenInstruction::NewTab(
-                        None,
-                        None,
-                        None,
-                        vec![],
-                        None,
-                        (vec![], vec![]),
-                        None,
-                        false,
-                        true,
-                        (destination_client_id, destination_is_web_client),
-                        Some(NotificationEnd::new(completion_tx_for_new_tab)),
-                    ))
+                    .send_to_screen(ScreenInstruction::CreateTabForTransfer {
+                        completion_tx: Some(NotificationEnd::new(completion_tx_for_new_tab)),
+                    })
                     .with_context(err_context)?;
                 let result = wait_for_action_completion(
                     completion_rx_for_new_tab,
-                    "transfer tab new tab",
+                    "transfer tab destination tab",
                     true,
                 );
                 if let Some(error_message) = result.error_message {
                     return Err(anyhow::anyhow!(error_message)).with_context(err_context);
                 }
-                self.bus
-                    .senders
-                    .send_to_screen(ScreenInstruction::CloseFocusedPane(
-                        destination_client_id,
-                        None,
-                    ))
+                let new_tab_id = result
+                    .affected_tab_id
+                    .context("failed to determine destination tab id for transferred tab")
                     .with_context(err_context)?;
+                destination_tab_id = Some(new_tab_id);
             } else {
                 self.bus
                     .senders
@@ -2032,7 +2040,7 @@ impl Pty {
                 .with_context(err_context)?;
         }
 
-        let client_or_tab_index = if let Some(target_tab_id) = request.target_tab_id {
+        let client_or_tab_index = if let Some(target_tab_id) = destination_tab_id {
             ClientTabIndexOrPaneId::TabIndex(target_tab_id)
         } else {
             ClientTabIndexOrPaneId::ClientId(destination_client_id)

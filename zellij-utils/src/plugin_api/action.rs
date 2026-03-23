@@ -1093,7 +1093,8 @@ impl TryFrom<Action> for ProtobufAction {
             | Action::NextSwapLayoutByTabId { .. }
             | Action::MoveTabByTabId { .. }
             | Action::MovePaneToTab { .. }
-            | Action::MovePaneToSession { .. } => {
+            | Action::MovePaneToSession { .. }
+            | Action::MoveTabToSession { .. } => {
                 Err("These are CLI-only actions, not available in keybindings")
             },
             Action::SwitchToMode { input_mode } => {

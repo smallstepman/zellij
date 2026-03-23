@@ -183,6 +183,10 @@ pub enum Action {
         session_name: Option<String>,
         tab_id: Option<usize>,
     },
+    MoveTabToSession {
+        new_session: bool,
+        session_name: Option<String>,
+    },
     /// Clear all buffers of a current screen
     ClearScreen,
     /// Dumps the screen to a file or STDOUT
@@ -873,6 +877,21 @@ impl Action {
                     new_session,
                     session_name: target_session_name,
                     tab_id,
+                }])
+            },
+            CliAction::MoveTabToSession {
+                new_session,
+                target_session_name,
+            } => {
+                if new_session && target_session_name.is_some() {
+                    return Err("new-session cannot be combined with session-name".into());
+                }
+                if !new_session && target_session_name.is_none() {
+                    return Err("session-name is required unless new-session is set".into());
+                }
+                Ok(vec![Action::MoveTabToSession {
+                    new_session,
+                    session_name: target_session_name,
                 }])
             },
             CliAction::MoveTab { direction, tab_id } => match tab_id {
@@ -3127,6 +3146,28 @@ mod tests {
                 assert_eq!(*pane_id, Some(PaneId::Terminal(7)));
             },
             _ => panic!("Expected MovePaneToSession action"),
+        }
+    }
+
+    #[test]
+    fn test_move_tab_to_new_session() {
+        let cli_action = CliAction::MoveTabToSession {
+            new_session: true,
+            target_session_name: None,
+        };
+        let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
+        assert!(result.is_ok());
+        let actions = result.unwrap();
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::MoveTabToSession {
+                new_session,
+                session_name,
+            } => {
+                assert!(*new_session);
+                assert!(session_name.is_none());
+            },
+            _ => panic!("Expected MoveTabToSession action"),
         }
     }
 

@@ -838,6 +838,7 @@ impl From<crate::input::actions::Action>
             MovePaneToSessionAction,
             MoveTabAction,
             MoveTabByTabIdAction,
+            MoveTabToSessionAction,
             NewBlockingPaneAction,
             NewFloatingPaneAction,
             NewFloatingPluginPaneAction,
@@ -1732,6 +1733,13 @@ impl From<crate::input::actions::Action>
                 new_session,
                 session_name,
                 tab_id: tab_id.map(|id| id as u64),
+            }),
+            crate::input::actions::Action::MoveTabToSession {
+                new_session,
+                session_name,
+            } => ActionType::MoveTabToSession(MoveTabToSessionAction {
+                new_session,
+                session_name,
             }),
         };
 
@@ -2651,6 +2659,10 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     tab_id: a.tab_id.map(|id| id as usize),
                 })
             },
+            ActionType::MoveTabToSession(a) => Ok(crate::input::actions::Action::MoveTabToSession {
+                new_session: a.new_session,
+                session_name: a.session_name,
+            }),
         }
     }
 }
