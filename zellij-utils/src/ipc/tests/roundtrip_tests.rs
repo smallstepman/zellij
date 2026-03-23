@@ -3335,6 +3335,16 @@ fn test_client_messages() {
         client_id: Some(100),
         is_cli_client: true,
     });
+    test_client_roundtrip!(ClientToServerMsg::Action {
+        action: Action::MovePaneToTab {
+            pane_id: Some(PaneId::Terminal(7)),
+            tab_id: None,
+            new_tab_name: Some("scratch".to_string()),
+        },
+        terminal_id: Some(1),
+        client_id: Some(100),
+        is_cli_client: true,
+    });
 }
 
 fn test_server_messages() {

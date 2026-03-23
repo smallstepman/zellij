@@ -427,6 +427,44 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::MovePaneToTab {
+            pane_id: action_pane_id,
+            tab_id,
+            new_tab_name,
+        } => {
+            let pane_id = action_pane_id
+                .map(Into::into)
+                .or(pane_id)
+                .with_context(|| {
+                "failed to move pane to tab: missing target pane id".to_string()
+            })?;
+            let notification_end = Some(NotificationEnd::new(completion_tx));
+            match tab_id {
+                Some(id) => {
+                    senders
+                        .send_to_screen(ScreenInstruction::BreakPanesToTabWithId {
+                            pane_ids: vec![pane_id],
+                            tab_id: id,
+                            should_change_focus_to_target_tab: true,
+                            client_id,
+                            completion_tx: notification_end,
+                        })
+                        .with_context(err_context)?;
+                },
+                None => {
+                    senders
+                        .send_to_screen(ScreenInstruction::BreakPanesToNewTab {
+                            pane_ids: vec![pane_id],
+                            default_shell: default_shell.clone(),
+                            should_change_focus_to_new_tab: true,
+                            new_tab_name,
+                            client_id,
+                            completion_tx: notification_end,
+                        })
+                        .with_context(err_context)?;
+                },
+            }
+        },
         Action::ClearScreen => {
             senders
                 .send_to_screen(ScreenInstruction::ClearScreen(
