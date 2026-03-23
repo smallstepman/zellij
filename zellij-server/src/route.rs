@@ -31,6 +31,7 @@ use zellij_utils::{
         keybinds::Keybinds,
         layout::Layout,
     },
+    sessions::generate_unique_session_name,
     ipc::{
         ClientAttributes, ClientToServerMsg, ExitReason, IpcReceiverWithContext, ServerToClientMsg,
     },
@@ -464,6 +465,68 @@ pub(crate) fn route_action(
                         .with_context(err_context)?;
                 },
             }
+        },
+        Action::MovePaneToSession {
+            pane_id: action_pane_id,
+            new_session,
+            session_name,
+            tab_id,
+        } => {
+            wait_forever = true;
+            let pane_id = action_pane_id
+                .map(Into::into)
+                .or(pane_id)
+                .with_context(|| {
+                    "failed to move pane to session: missing target pane id".to_string()
+                })?;
+            let target_session_name = if new_session {
+                session_name
+                    .or_else(generate_unique_session_name)
+                    .with_context(|| {
+                        "failed to generate a session name for move-pane-to-session".to_string()
+                    })?
+            } else {
+                session_name.with_context(|| {
+                    "failed to move pane to session: missing target session name".to_string()
+                })?
+            };
+            let notification_end = Some(NotificationEnd::new(completion_tx));
+            senders
+                .send_to_screen(ScreenInstruction::MovePaneToSession {
+                    pane_id,
+                    target_session_name,
+                    target_tab_id: tab_id,
+                    new_session,
+                    client_id,
+                    completion_tx: notification_end,
+                })
+                .with_context(err_context)?;
+        },
+        Action::MoveTabToSession {
+            new_session,
+            session_name,
+        } => {
+            wait_forever = true;
+            let target_session_name = if new_session {
+                session_name
+                    .or_else(generate_unique_session_name)
+                    .with_context(|| {
+                        "failed to generate a session name for move-tab-to-session".to_string()
+                    })?
+            } else {
+                session_name.with_context(|| {
+                    "failed to move tab to session: missing target session name".to_string()
+                })?
+            };
+            let notification_end = Some(NotificationEnd::new(completion_tx));
+            senders
+                .send_to_screen(ScreenInstruction::MoveTabToSession {
+                    target_session_name,
+                    new_session,
+                    client_id,
+                    completion_tx: notification_end,
+                })
+                .with_context(err_context)?;
         },
         Action::ClearScreen => {
             senders
@@ -3098,6 +3161,8 @@ fn send_output_to_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use zellij_utils::channels::{self, SenderWithContext};
 
     #[test]
     fn test_notification_end_sets_affected_tab_id() {
@@ -3162,5 +3227,96 @@ mod tests {
         assert_eq!(cloned.affected_tab_id, Some(99));
         // But channel should be None (as per the Clone implementation comment)
         assert!(cloned.channel.is_none());
+    }
+
+    fn thread_senders_with_screen_receiver(
+    ) -> (
+        ThreadSenders,
+        channels::Receiver<(ScreenInstruction, zellij_utils::errors::ErrorContext)>,
+    ) {
+        let (to_screen, screen_receiver) = channels::unbounded();
+        let to_screen = SenderWithContext::new(to_screen);
+        (
+            ThreadSenders {
+                to_screen: Some(to_screen),
+                should_silently_fail: true,
+                ..Default::default()
+            },
+            screen_receiver,
+        )
+    }
+
+    #[test]
+    fn move_pane_to_session_waits_for_full_completion() {
+        let (senders, screen_receiver) = thread_senders_with_screen_receiver();
+        let handle = std::thread::spawn(move || {
+            route_action(
+                Action::MovePaneToSession {
+                    pane_id: Some(zellij_utils::data::PaneId::Terminal(1)),
+                    new_session: false,
+                    session_name: Some("target-session".to_string()),
+                    tab_id: Some(0),
+                },
+                1,
+                None,
+                None,
+                senders,
+                PluginCapabilities::default(),
+                ClientAttributes::default(),
+                None,
+                Box::new(Layout::default()),
+                None,
+                Keybinds::default(),
+                InputMode::Normal,
+                None,
+            )
+            .unwrap()
+        });
+
+        let screen_instruction = screen_receiver.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(
+            !handle.is_finished(),
+            "move-pane-to-session should keep waiting until transfer completion is signaled"
+        );
+
+        drop(screen_instruction);
+        let _ = handle.join().unwrap();
+    }
+
+    #[test]
+    fn move_tab_to_session_waits_for_full_completion() {
+        let (senders, screen_receiver) = thread_senders_with_screen_receiver();
+        let handle = std::thread::spawn(move || {
+            route_action(
+                Action::MoveTabToSession {
+                    new_session: false,
+                    session_name: Some("target-session".to_string()),
+                },
+                1,
+                None,
+                None,
+                senders,
+                PluginCapabilities::default(),
+                ClientAttributes::default(),
+                None,
+                Box::new(Layout::default()),
+                None,
+                Keybinds::default(),
+                InputMode::Normal,
+                None,
+            )
+            .unwrap()
+        });
+
+        let screen_instruction = screen_receiver.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(
+            !handle.is_finished(),
+            "move-tab-to-session should keep waiting until transfer completion is signaled"
+        );
+
+        drop(screen_instruction);
+        let _ = handle.join().unwrap();
     }
 }

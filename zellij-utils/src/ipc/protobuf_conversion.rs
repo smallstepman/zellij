@@ -835,8 +835,10 @@ impl From<crate::input::actions::Action>
             MovePaneBackwardsByPaneIdAction,
             MovePaneByPaneIdAction,
             MovePaneToTabAction,
+            MovePaneToSessionAction,
             MoveTabAction,
             MoveTabByTabIdAction,
+            MoveTabToSessionAction,
             NewBlockingPaneAction,
             NewFloatingPaneAction,
             NewFloatingPluginPaneAction,
@@ -1720,6 +1722,24 @@ impl From<crate::input::actions::Action>
                 pane_id: pane_id.map(|p| p.into()),
                 tab_id: tab_id.map(|id| id as u64),
                 new_tab_name,
+            }),
+            crate::input::actions::Action::MovePaneToSession {
+                pane_id,
+                new_session,
+                session_name,
+                tab_id,
+            } => ActionType::MovePaneToSession(MovePaneToSessionAction {
+                pane_id: pane_id.map(|p| p.into()),
+                new_session,
+                session_name,
+                tab_id: tab_id.map(|id| id as u64),
+            }),
+            crate::input::actions::Action::MoveTabToSession {
+                new_session,
+                session_name,
+            } => ActionType::MoveTabToSession(MoveTabToSessionAction {
+                new_session,
+                session_name,
             }),
         };
 
@@ -2630,6 +2650,18 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                 pane_id: a.pane_id.map(|p| p.try_into()).transpose()?,
                 tab_id: a.tab_id.map(|id| id as usize),
                 new_tab_name: a.new_tab_name,
+            }),
+            ActionType::MovePaneToSession(a) => {
+                Ok(crate::input::actions::Action::MovePaneToSession {
+                    pane_id: a.pane_id.map(|p| p.try_into()).transpose()?,
+                    new_session: a.new_session,
+                    session_name: a.session_name,
+                    tab_id: a.tab_id.map(|id| id as usize),
+                })
+            },
+            ActionType::MoveTabToSession(a) => Ok(crate::input::actions::Action::MoveTabToSession {
+                new_session: a.new_session,
+                session_name: a.session_name,
             }),
         }
     }

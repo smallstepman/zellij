@@ -30,6 +30,7 @@ use std::env::set_var;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
     plugins::PluginInstruction,
@@ -53,8 +54,9 @@ use crate::panes::sixel::SixelImageStore;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use zellij_utils::data::{PaneContents, PaneRenderReport};
+use zellij_utils::data::{PaneContents, PaneInfo, PaneRenderReport};
 use zellij_utils::ipc::ExitReason;
+use crate::session_transfer::TransferredPane;
 
 fn take_snapshot_and_cursor_coordinates(
     ansi_instructions: &str,
@@ -370,6 +372,7 @@ struct MockScreen {
     pub config: Config,
     advanced_mouse_actions: bool,
     last_opened_tab_index: Option<usize>,
+    session_name: String,
 }
 
 impl MockScreen {
@@ -394,10 +397,11 @@ impl MockScreen {
         )
         .should_silently_fail();
         let debug = false;
+        let session_name = self.session_name.clone();
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
-                set_var("ZELLIJ_SESSION_NAME", "zellij-test");
+                set_var("ZELLIJ_SESSION_NAME", session_name);
                 screen_thread_main(
                     screen_bus,
                     None,
@@ -480,10 +484,11 @@ impl MockScreen {
         )
         .should_silently_fail();
         let debug = false;
+        let session_name = self.session_name.clone();
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
-                set_var("ZELLIJ_SESSION_NAME", "zellij-test");
+                set_var("ZELLIJ_SESSION_NAME", session_name);
                 screen_thread_main(
                     screen_bus,
                     None,
@@ -625,6 +630,10 @@ impl MockScreen {
 
 impl MockScreen {
     pub fn new(size: Size) -> Self {
+        Self::new_with_session_name(size, "zellij-test".to_owned())
+    }
+
+    pub fn new_with_session_name(size: Size, session_name: String) -> Self {
         let (to_server, server_receiver): ChannelWithContext<ServerInstruction> =
             channels::bounded(50);
         let to_server = SenderWithContext::new(to_server);
@@ -726,6 +735,7 @@ impl MockScreen {
             last_opened_tab_index: None,
             config: Config::default(),
             advanced_mouse_actions: true,
+            session_name,
         }
     }
     pub fn set_advanced_hover_effects(&mut self, advanced_mouse_actions: bool) {
@@ -6636,6 +6646,445 @@ pub fn send_cli_move_pane_to_existing_tab_with_pane_id() {
     ));
 
     mock_screen.teardown(vec![]);
+}
+
+#[test]
+pub fn send_cli_move_pane_to_existing_session_with_pane_id() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 10;
+    let mut mock_screen = MockScreen::new(size);
+    let screen_receiver = mock_screen.screen_receiver.take().unwrap();
+    let session_metadata = mock_screen.clone_session_metadata();
+    let captured_instruction = Arc::new(Mutex::new(None));
+    let captured_instruction_for_thread = captured_instruction.clone();
+    let screen_thread = std::thread::spawn(move || {
+        let (instruction, _err_ctx) = screen_receiver.recv().unwrap();
+        *captured_instruction_for_thread.lock().unwrap() = Some(instruction.clone());
+    });
+    let cli_action = CliAction::MovePaneToSession {
+        pane_id: None,
+        new_session: false,
+        target_session_name: Some("target-session".to_string()),
+        tab_id: Some(3),
+    };
+
+    send_cli_action_to_server_with_pane_id(
+        &session_metadata,
+        cli_action,
+        client_id,
+        Some(PaneId::Terminal(1)),
+    );
+
+    screen_thread.join().unwrap();
+    let instruction = captured_instruction
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("screen instruction should be captured");
+    assert!(matches!(
+        instruction,
+        ScreenInstruction::MovePaneToSession {
+            pane_id,
+            target_session_name: ref name,
+            target_tab_id: Some(3),
+            new_session: false,
+            client_id: instruction_client_id,
+            completion_tx: Some(_),
+        } if pane_id == PaneId::Terminal(1)
+            && name == "target-session"
+            && instruction_client_id == client_id
+    ));
+
+    mock_screen.teardown(vec![]);
+}
+
+#[test]
+pub fn send_cli_move_tab_to_existing_session() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 10;
+    let mut mock_screen = MockScreen::new(size);
+    let screen_receiver = mock_screen.screen_receiver.take().unwrap();
+    let session_metadata = mock_screen.clone_session_metadata();
+    let captured_instruction = Arc::new(Mutex::new(None));
+    let captured_instruction_for_thread = captured_instruction.clone();
+    let screen_thread = std::thread::spawn(move || {
+        let (instruction, _err_ctx) = screen_receiver.recv().unwrap();
+        *captured_instruction_for_thread.lock().unwrap() = Some(instruction.clone());
+    });
+    let cli_action = CliAction::MoveTabToSession {
+        new_session: false,
+        target_session_name: Some("target-session".to_string()),
+    };
+
+    send_cli_action_to_server(&session_metadata, cli_action, client_id);
+
+    screen_thread.join().unwrap();
+    let instruction = captured_instruction
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("screen instruction should be captured");
+    assert!(matches!(
+        instruction,
+        ScreenInstruction::MoveTabToSession {
+            target_session_name: ref name,
+            new_session: false,
+            client_id: instruction_client_id,
+            completion_tx: Some(_),
+        } if name == "target-session" && instruction_client_id == client_id
+    ));
+
+    mock_screen.teardown(vec![]);
+}
+
+#[test]
+pub fn move_tab_to_session_works_without_connected_clients() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(None, vec![]);
+    mock_screen.drop_all_pty_messages();
+
+    std::thread::sleep(Duration::from_millis(100));
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::RemoveClient(mock_screen.main_client_id));
+    std::thread::sleep(Duration::from_millis(100));
+
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let _ = mock_screen.to_screen.send(ScreenInstruction::MoveTabToSession {
+        target_session_name: "target-session".to_owned(),
+        new_session: false,
+        client_id: mock_screen.main_client_id,
+        completion_tx: Some(crate::route::NotificationEnd::new(completion_tx)),
+    });
+
+    let result =
+        crate::route::wait_for_action_completion(completion_rx, "move-tab-to-session", true);
+
+    mock_screen.teardown(vec![screen_thread]);
+    assert_ne!(
+        result.error_message.as_deref(),
+        Some("Failed to find active tab"),
+        "move-tab-to-session should keep working for background sessions without connected clients"
+    );
+}
+
+#[test]
+pub fn move_tab_to_session_ignores_default_plugin_panes() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut mock_screen = MockScreen::new(size);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let captured_request = Arc::new(Mutex::new(None));
+    let captured_request_for_thread = captured_request.clone();
+    let pty_thread = std::thread::spawn(move || loop {
+        let (instruction, _err_ctx) = pty_receiver.recv().unwrap();
+        match instruction {
+            PtyInstruction::TransferPanesToSession(request, _) => {
+                *captured_request_for_thread.lock().unwrap() = Some(request);
+                break;
+            },
+            PtyInstruction::Exit => break,
+            _ => {},
+        }
+    });
+    let screen_thread = mock_screen.run(None, vec![]);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::MoveTabToSession {
+        target_session_name: "target-session".to_owned(),
+        new_session: false,
+        client_id: mock_screen.main_client_id,
+        completion_tx: None,
+    });
+    pty_thread.join().unwrap();
+
+    let request = captured_request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("move-tab-to-session should send a transfer request to PTY");
+
+    mock_screen.teardown(vec![screen_thread]);
+    assert!(
+        !request.panes.is_empty(),
+        "move-tab-to-session should transfer at least one live terminal pane"
+    );
+    assert!(
+        request.panes.iter().all(|pane| {
+            !pane.pane_info.is_plugin
+                && !pane.pane_info.is_suppressed
+                && !pane.pane_info.exited
+                && !pane.pane_info.is_held
+        }),
+        "move-tab-to-session should skip default plugin panes instead of transferring them"
+    );
+}
+
+#[test]
+pub fn filter_live_terminal_panes_for_session_transfer_skips_ui_panes_and_restores_focus() {
+    let ui_plugin = TransferredPane {
+        pane_info: PaneInfo {
+            id: 1,
+            is_plugin: true,
+            is_focused: true,
+            ..Default::default()
+        },
+        invoked_with: None,
+        pane_contents: PaneContents {
+            lines_above_viewport: vec![],
+            lines_below_viewport: vec![],
+            viewport: vec![],
+            selected_text: None,
+        },
+        child_pid: None,
+    };
+    let live_terminal = TransferredPane {
+        pane_info: PaneInfo {
+            id: 2,
+            is_plugin: false,
+            is_focused: false,
+            ..Default::default()
+        },
+        invoked_with: None,
+        pane_contents: PaneContents {
+            lines_above_viewport: vec![],
+            lines_below_viewport: vec![],
+            viewport: vec![],
+            selected_text: None,
+        },
+        child_pid: None,
+    };
+
+    let filtered = crate::screen::filter_live_terminal_panes_for_session_transfer(vec![
+        ui_plugin,
+        live_terminal,
+    ]);
+
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].pane_info.id, 2);
+    assert!(
+        filtered[0].pane_info.is_focused,
+        "when the focused pane is filtered out, the first live terminal should become focused"
+    );
+}
+
+#[test]
+pub fn create_tab_for_transfer_works_without_connected_clients() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(None, vec![]);
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::RemoveClient(mock_screen.main_client_id));
+
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::CreateTabForTransfer {
+            completion_tx: Some(crate::route::NotificationEnd::new(completion_tx)),
+        });
+
+    let result =
+        crate::route::wait_for_action_completion(completion_rx, "create-tab-for-transfer", true);
+
+    mock_screen.teardown(vec![screen_thread]);
+    assert_eq!(result.error_message, None);
+    assert!(
+        result.affected_tab_id.is_some(),
+        "creating a transfer destination tab should report the new stable tab id even without connected clients"
+    );
+}
+
+#[test]
+pub fn close_tab_without_pty_closes_tab_shell_without_reclosing_terminals() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut mock_screen = MockScreen::new(size);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    let pty_events = Arc::new(Mutex::new(vec![]));
+    let server_events = Arc::new(Mutex::new(vec![]));
+    let pty_thread = log_actions_in_thread!(pty_events, PtyInstruction::Exit, pty_receiver);
+    let server_thread =
+        log_actions_in_thread!(server_events, ServerInstruction::KillSession, server_receiver);
+    let screen_thread = mock_screen.run(None, vec![]);
+
+    std::thread::sleep(Duration::from_millis(100));
+    pty_events.lock().unwrap().clear();
+    server_events.lock().unwrap().clear();
+
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::CloseTabWithoutPty(0, None));
+
+    std::thread::sleep(Duration::from_millis(100));
+    let logged_pty_events = pty_events.lock().unwrap().clone();
+    let logged_server_events = server_events.lock().unwrap().clone();
+
+    mock_screen.teardown(vec![pty_thread, server_thread, screen_thread]);
+
+    assert!(
+        logged_pty_events
+            .iter()
+            .all(|event| !matches!(event, PtyInstruction::CloseTab(..))),
+        "closing a transferred source tab should not send PTY close-tab instructions"
+    );
+    assert!(
+        logged_server_events
+            .iter()
+            .any(|event| matches!(event, ServerInstruction::Render(None))),
+        "closing the last tab without PTY should leave the screen with no tabs to render"
+    );
+}
+
+#[test]
+pub fn fresh_session_starts_session_transfer_listener_without_later_attach() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % 1_000_000_000;
+    let session_name = format!("zt-{unique_suffix:x}");
+    let socket_path =
+        zellij_utils::consts::session_transfer_socket_file_name(session_name.as_str());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let mut mock_screen = MockScreen::new_with_session_name(size, session_name);
+    let screen_thread = mock_screen.run(None, vec![]);
+
+    let listener_started = (0..20).any(|_| {
+        if socket_path.exists() {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+            false
+        }
+    });
+
+    mock_screen.teardown(vec![screen_thread]);
+    assert!(
+        listener_started,
+        "fresh sessions should bind the transfer listener before any later attach path"
+    );
+}
+
+#[test]
+pub fn renaming_session_moves_session_transfer_listener_socket() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % 1_000_000_000;
+    let old_session_name = format!("zt-old-{unique_suffix:x}");
+    let new_session_name = format!("zt-new-{unique_suffix:x}");
+    let old_socket_path =
+        zellij_utils::consts::session_transfer_socket_file_name(old_session_name.as_str());
+    let new_socket_path =
+        zellij_utils::consts::session_transfer_socket_file_name(new_session_name.as_str());
+    let _ = std::fs::remove_file(&old_socket_path);
+    let _ = std::fs::remove_file(&new_socket_path);
+
+    let mut mock_screen = MockScreen::new_with_session_name(size, old_session_name);
+    let screen_thread = mock_screen.run(None, vec![]);
+
+    let listener_started = (0..20).any(|_| {
+        if old_socket_path.exists() {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+            false
+        }
+    });
+    assert!(listener_started, "expected transfer listener to start before rename");
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::RenameSession(
+        new_session_name,
+        mock_screen.main_client_id,
+        None,
+    ));
+
+    let listener_renamed = (0..20).any(|_| {
+        if new_socket_path.exists() && !old_socket_path.exists() {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+            false
+        }
+    });
+
+    mock_screen.teardown(vec![screen_thread]);
+    assert!(
+        listener_renamed,
+        "renaming a session should move the transfer listener socket to the new session path"
+    );
+}
+
+#[test]
+pub fn renaming_session_immediately_after_startup_moves_transfer_listener_socket() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % 1_000_000_000;
+    let old_session_name = format!("zt-now-{unique_suffix:x}");
+    let new_session_name = format!("zt-next-{unique_suffix:x}");
+    let old_socket_path =
+        zellij_utils::consts::session_transfer_socket_file_name(old_session_name.as_str());
+    let new_socket_path =
+        zellij_utils::consts::session_transfer_socket_file_name(new_session_name.as_str());
+    let _ = std::fs::remove_file(&old_socket_path);
+    let _ = std::fs::remove_file(&new_socket_path);
+
+    let mut mock_screen = MockScreen::new_with_session_name(size, old_session_name);
+    let screen_thread = mock_screen.run(None, vec![]);
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::RenameSession(
+        new_session_name,
+        mock_screen.main_client_id,
+        None,
+    ));
+
+    let listener_renamed = (0..20).any(|_| {
+        if new_socket_path.exists() && !old_socket_path.exists() {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+            false
+        }
+    });
+
+    mock_screen.teardown(vec![screen_thread]);
+    assert!(
+        listener_renamed,
+        "renaming immediately after startup should still move the transfer listener socket"
+    );
 }
 
 #[test]

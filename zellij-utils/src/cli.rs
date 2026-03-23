@@ -780,6 +780,32 @@ pub enum CliAction {
         #[clap(short, long, value_parser)]
         pane_id: Option<String>,
     },
+    /// Move a pane to another session
+    #[clap(name = "move-pane-to-session")]
+    MovePaneToSession {
+        /// Move the pane to a freshly created session
+        #[clap(long, value_parser, default_value("false"), takes_value(false))]
+        new_session: bool,
+        /// Move the pane to an existing session by name
+        #[clap(long = "session-name", value_parser)]
+        target_session_name: Option<String>,
+        /// Move the pane into a tab in the destination session
+        #[clap(long, value_parser)]
+        tab_id: Option<usize>,
+        /// Target a specific pane by ID (eg. terminal_1, plugin_2, or 3)
+        #[clap(short, long, value_parser)]
+        pane_id: Option<String>,
+    },
+    /// Move the active tab to another session
+    #[clap(name = "move-tab-to-session")]
+    MoveTabToSession {
+        /// Move the tab to a freshly created session
+        #[clap(long, value_parser, default_value("false"), takes_value(false))]
+        new_session: bool,
+        /// Move the tab to an existing session by name
+        #[clap(long = "session-name", value_parser)]
+        target_session_name: Option<String>,
+    },
     /// Clear all buffers for a focused pane
     Clear {
         /// Target a specific pane by ID (eg. terminal_1, plugin_2, or 3)
@@ -1730,4 +1756,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn move_pane_to_session_existing_session_parses_session_tab_and_pane_id() {
+        let action = parse_action_big_stack(&[
+            "move-pane-to-session",
+            "--session-name",
+            "target-session",
+            "--tab-id",
+            "3",
+            "--pane-id",
+            "terminal_7",
+        ]);
+        match action {
+            CliAction::MovePaneToSession {
+                new_session,
+                target_session_name,
+                tab_id,
+                pane_id,
+            } => {
+                assert!(!new_session);
+                assert_eq!(target_session_name.as_deref(), Some("target-session"));
+                assert_eq!(tab_id, Some(3));
+                assert_eq!(pane_id.as_deref(), Some("terminal_7"));
+            },
+            other => panic!("Expected MovePaneToSession, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn move_tab_to_session_new_session_parses_new_session_flag() {
+        let action = parse_action_big_stack(&["move-tab-to-session", "--new-session"]);
+        match action {
+            CliAction::MoveTabToSession {
+                new_session,
+                target_session_name,
+            } => {
+                assert!(new_session);
+                assert!(target_session_name.is_none());
+            },
+            other => panic!("Expected MoveTabToSession, got {:?}", other),
+        }
+    }
 }

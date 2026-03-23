@@ -272,6 +272,9 @@ message Action {
     PreviousSwapLayoutByTabIdAction previous_swap_layout_by_tab_id = 132;
     NextSwapLayoutByTabIdAction next_swap_layout_by_tab_id = 133;
     MoveTabByTabIdAction move_tab_by_tab_id = 134;
+    MovePaneToTabAction move_pane_to_tab = 135;
+    MovePaneToSessionAction move_pane_to_session = 136;
+    MoveTabToSessionAction move_tab_to_session = 137;
   }
 }
 
@@ -342,6 +345,21 @@ message QueryTabNamesAction {}
 message BreakPaneAction {}
 message BreakPaneRightAction {}
 message BreakPaneLeftAction {}
+message MovePaneToTabAction {
+  optional PaneId pane_id = 1;
+  optional uint64 tab_id = 2;
+  optional string new_tab_name = 3;
+}
+message MovePaneToSessionAction {
+  optional PaneId pane_id = 1;
+  bool new_session = 2;
+  optional string session_name = 3;
+  optional uint64 tab_id = 4;
+}
+message MoveTabToSessionAction {
+  bool new_session = 1;
+  optional string session_name = 2;
+}
 message ListClientsAction {}
 message ListPanesAction {
   bool show_tab = 1;
