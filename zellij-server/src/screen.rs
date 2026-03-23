@@ -42,6 +42,7 @@ use crate::session_transfer::{
     bind_session_transfer_socket, recv_request_with_fds, send_response,
     SessionTransferResponse,
 };
+use crate::session_transfer::{SessionTransferRequest, TransferKind, TransferredPane};
 
 use log::{debug, warn};
 use zellij_utils::data::{
@@ -85,7 +86,7 @@ use crate::{
     panes::PaneId,
     plugins::{DumpSessionLayoutResponse, PluginId, PluginInstruction, PluginRenderAsset},
     pty::{get_default_shell, ClientTabIndexOrPaneId, PtyInstruction, VteBytes},
-    tab::{SuppressedPanes, Tab},
+    tab::{pane_info_for_pane, SuppressedPanes, Tab},
     thread_bus::Bus,
     ui::loading_indication::LoadingIndication,
     ClientId, ServerInstruction,
@@ -427,6 +428,14 @@ pub enum ScreenInstruction {
         pane_ids: Vec<PaneId>,
         tab_id: usize,
         should_change_focus_to_target_tab: bool,
+        client_id: ClientId,
+        completion_tx: Option<NotificationEnd>,
+    },
+    MovePaneToSession {
+        pane_id: PaneId,
+        target_session_name: String,
+        target_tab_id: Option<usize>,
+        new_session: bool,
         client_id: ClientId,
         completion_tx: Option<NotificationEnd>,
     },
@@ -848,6 +857,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::CloseTabWithId(..) => ScreenContext::CloseTabWithId,
             ScreenInstruction::RenameTabWithId(..) => ScreenContext::RenameTabWithId,
             ScreenInstruction::BreakPanesToTabWithId { .. } => ScreenContext::BreakPanesToTabWithId,
+            ScreenInstruction::MovePaneToSession { .. } => ScreenContext::MovePaneToSession,
             ScreenInstruction::TerminalResize(..) => ScreenContext::TerminalResize,
             ScreenInstruction::TerminalPixelDimensions(..) => {
                 ScreenContext::TerminalPixelDimensions
@@ -7574,6 +7584,76 @@ pub(crate) fn screen_thread_main(
                     }
                     screen.clear_pane_group(&client_id);
                 }
+            },
+            ScreenInstruction::MovePaneToSession {
+                pane_id,
+                target_session_name,
+                target_tab_id,
+                new_session,
+                client_id,
+                mut completion_tx,
+            } => {
+                let focused_pane_id = screen
+                    .get_active_tab(client_id)
+                    .ok()
+                    .and_then(|tab| tab.get_active_pane_id(client_id));
+                let empty_pane_group: HashMap<ClientId, Vec<PaneId>> = HashMap::new();
+                let mut transferred_pane = None;
+                for tab in screen.get_tabs_mut().values_mut() {
+                    if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
+                        let mut pane_info = pane_info_for_pane(&pane_id, &*pane, &empty_pane_group);
+                        pane_info.is_focused = Some(pane_id) == focused_pane_id;
+                        transferred_pane = Some(TransferredPane {
+                            pane_info,
+                            invoked_with: pane.invoked_with().clone(),
+                            pane_contents: pane.pane_contents_with_ansi(None, true, None),
+                            child_pid: None,
+                        });
+                        break;
+                    }
+                }
+
+                let Some(transferred_pane) = transferred_pane else {
+                    if let Some(completion_tx) = completion_tx.as_mut() {
+                        completion_tx.set_exit_status(1);
+                        completion_tx.set_error_message(format!(
+                            "Failed to find pane with id {:?}",
+                            pane_id
+                        ));
+                    }
+                    return Ok(());
+                };
+
+                if transferred_pane.pane_info.is_plugin
+                    || transferred_pane.pane_info.is_suppressed
+                    || transferred_pane.pane_info.exited
+                    || transferred_pane.pane_info.is_held
+                {
+                    if let Some(completion_tx) = completion_tx.as_mut() {
+                        completion_tx.set_exit_status(1);
+                        completion_tx.set_error_message(
+                            "Only live terminal panes can be transferred between sessions"
+                                .to_string(),
+                        );
+                    }
+                    return Ok(());
+                }
+
+                let request = SessionTransferRequest {
+                    transfer_kind: TransferKind::Pane,
+                    new_session,
+                    target_session_name,
+                    target_tab_id,
+                    panes: vec![transferred_pane],
+                };
+                screen
+                    .bus
+                    .senders
+                    .send_to_pty(PtyInstruction::TransferPanesToSession(
+                        request,
+                        completion_tx,
+                    ))
+                    .with_context(|| "failed to start pane transfer".to_string())?;
             },
             ScreenInstruction::RequestPluginPermissions(plugin_id, plugin_permission) => {
                 let all_tabs = screen.get_tabs_mut();
