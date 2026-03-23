@@ -5,6 +5,8 @@ use crate::thread_bus::Bus;
 use interprocess::local_socket::Stream as LocalSocketStream;
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
 use zellij_utils::channels::SenderWithContext;
 use zellij_utils::data::Palette;
@@ -33,6 +35,8 @@ struct MockServerOsApi {
     write_behavior: Arc<Mutex<HashMap<u32, WriteBehavior>>>,
     /// Log of (terminal_id, bytes) for each successful write.
     write_log: Arc<Mutex<Vec<(u32, Vec<u8>)>>>,
+    #[cfg(unix)]
+    terminal_raw_fds: Arc<Mutex<HashMap<u32, RawFd>>>,
 }
 
 impl MockServerOsApi {
@@ -40,6 +44,8 @@ impl MockServerOsApi {
         MockServerOsApi {
             write_behavior: Arc::new(Mutex::new(HashMap::new())),
             write_log: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(unix)]
+            terminal_raw_fds: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     fn set_behavior(&self, terminal_id: u32, behavior: WriteBehavior) {
@@ -113,6 +119,21 @@ impl ServerOsApi for MockServerOsApi {
     }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         Ok(())
+    }
+    #[cfg(unix)]
+    fn register_terminal_raw_fd(&self, terminal_id: u32, raw_fd: RawFd) {
+        self.terminal_raw_fds
+            .lock()
+            .unwrap()
+            .insert(terminal_id, raw_fd);
+    }
+    #[cfg(unix)]
+    fn terminal_raw_fd(&self, terminal_id: u32) -> Option<RawFd> {
+        self.terminal_raw_fds
+            .lock()
+            .unwrap()
+            .get(&terminal_id)
+            .copied()
     }
     fn kill(&self, _pid: u32) -> Result<()> {
         Ok(())

@@ -20,6 +20,7 @@ mod pty_writer;
 mod route;
 mod screen;
 mod session_layout_metadata;
+mod session_transfer;
 mod terminal_bytes;
 mod thread_bus;
 mod ui;

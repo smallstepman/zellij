@@ -27,6 +27,8 @@ use crate::background_jobs::BackgroundJob;
 use crate::os_input_output::AsyncReader;
 use crate::pty_writer::PtyWriteInstruction;
 use std::env::set_var;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -121,6 +123,15 @@ fn send_cli_action_to_server(
     cli_action: CliAction,
     client_id: ClientId,
 ) {
+    send_cli_action_to_server_with_pane_id(session_metadata, cli_action, client_id, None);
+}
+
+fn send_cli_action_to_server_with_pane_id(
+    session_metadata: &SessionMetaData,
+    cli_action: CliAction,
+    client_id: ClientId,
+    pane_id: Option<PaneId>,
+) {
     let get_current_dir = || PathBuf::from(".");
     let actions = Action::actions_from_cli(cli_action, Box::new(get_current_dir), None).unwrap();
     let senders = session_metadata.senders.clone();
@@ -143,7 +154,7 @@ fn send_cli_action_to_server(
             action,
             client_id,
             None,
-            None,
+            pane_id,
             senders.clone(),
             capabilities,
             client_attributes.clone(),
@@ -189,6 +200,12 @@ impl ServerOsApi for FakeInputOutput {
     }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         unimplemented!()
+    }
+    #[cfg(unix)]
+    fn register_terminal_raw_fd(&self, _terminal_id: u32, _raw_fd: RawFd) {}
+    #[cfg(unix)]
+    fn terminal_raw_fd(&self, _terminal_id: u32) -> Option<RawFd> {
+        None
     }
     fn kill(&self, _pid: u32) -> Result<()> {
         unimplemented!()
@@ -6516,6 +6533,109 @@ pub fn send_cli_move_pane_backwards_with_pane_id() {
         true,
         "MovePaneBackwards with pane_id CLI action completed without errors"
     );
+}
+
+#[test]
+pub fn send_cli_move_pane_to_new_tab_with_pane_id() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 10;
+    let mut mock_screen = MockScreen::new(size);
+    let screen_receiver = mock_screen.screen_receiver.take().unwrap();
+    let session_metadata = mock_screen.clone_session_metadata();
+    let captured_instruction = Arc::new(Mutex::new(None));
+    let captured_instruction_for_thread = captured_instruction.clone();
+    let screen_thread = std::thread::spawn(move || {
+        let (instruction, _err_ctx) = screen_receiver.recv().unwrap();
+        *captured_instruction_for_thread.lock().unwrap() = Some(instruction.clone());
+    });
+    let cli_action = CliAction::MovePaneToTab {
+        pane_id: None,
+        new_tab: true,
+        tab_id: None,
+        name: Some("focus-me".to_string()),
+    };
+
+    send_cli_action_to_server_with_pane_id(
+        &session_metadata,
+        cli_action,
+        client_id,
+        Some(PaneId::Terminal(1)),
+    );
+
+    screen_thread.join().unwrap();
+    let instruction = captured_instruction
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("screen instruction should be captured");
+    assert!(matches!(
+        instruction,
+        ScreenInstruction::BreakPanesToNewTab {
+            pane_ids,
+            default_shell: None,
+            should_change_focus_to_new_tab: true,
+            new_tab_name: Some(ref name),
+            client_id: instruction_client_id,
+            completion_tx: Some(_),
+        } if pane_ids == vec![PaneId::Terminal(1)]
+            && name == "focus-me"
+            && instruction_client_id == client_id
+    ));
+
+    mock_screen.teardown(vec![]);
+}
+
+#[test]
+pub fn send_cli_move_pane_to_existing_tab_with_pane_id() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 10;
+    let mut mock_screen = MockScreen::new(size);
+    let screen_receiver = mock_screen.screen_receiver.take().unwrap();
+    let session_metadata = mock_screen.clone_session_metadata();
+    let captured_instruction = Arc::new(Mutex::new(None));
+    let captured_instruction_for_thread = captured_instruction.clone();
+    let screen_thread = std::thread::spawn(move || {
+        let (instruction, _err_ctx) = screen_receiver.recv().unwrap();
+        *captured_instruction_for_thread.lock().unwrap() = Some(instruction.clone());
+    });
+    let cli_action = CliAction::MovePaneToTab {
+        pane_id: None,
+        new_tab: false,
+        tab_id: Some(1),
+        name: None,
+    };
+
+    send_cli_action_to_server_with_pane_id(
+        &session_metadata,
+        cli_action,
+        client_id,
+        Some(PaneId::Terminal(1)),
+    );
+
+    screen_thread.join().unwrap();
+    let instruction = captured_instruction
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("screen instruction should be captured");
+    assert!(matches!(
+        instruction,
+        ScreenInstruction::BreakPanesToTabWithId {
+            pane_ids,
+            tab_id: 1,
+            should_change_focus_to_target_tab: true,
+            client_id: instruction_client_id,
+            completion_tx: Some(_),
+        } if pane_ids == vec![PaneId::Terminal(1)] && instruction_client_id == client_id
+    ));
+
+    mock_screen.teardown(vec![]);
 }
 
 #[test]

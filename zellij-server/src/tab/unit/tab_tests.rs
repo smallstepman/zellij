@@ -15,6 +15,8 @@ use crate::os_input_output::AsyncReader;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 
 use interprocess::local_socket::Stream as LocalSocketStream;
 use zellij_utils::{
@@ -51,6 +53,12 @@ impl ServerOsApi for FakeInputOutput {
     }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         unimplemented!()
+    }
+    #[cfg(unix)]
+    fn register_terminal_raw_fd(&self, _terminal_id: u32, _raw_fd: RawFd) {}
+    #[cfg(unix)]
+    fn terminal_raw_fd(&self, _terminal_id: u32) -> Option<RawFd> {
+        None
     }
     fn kill(&self, _pid: u32) -> Result<()> {
         unimplemented!()

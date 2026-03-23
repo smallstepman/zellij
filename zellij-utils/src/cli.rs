@@ -758,6 +758,28 @@ pub enum CliAction {
         #[clap(short, long, value_parser)]
         pane_id: Option<String>,
     },
+    /// Move a pane to a new tab or to an existing tab by ID
+    MovePaneToTab {
+        /// Move the pane to a freshly created tab
+        #[clap(
+            long,
+            value_parser,
+            default_value("false"),
+            takes_value(false),
+            conflicts_with("tab-id"),
+            required_unless_present("tab-id")
+        )]
+        new_tab: bool,
+        /// Move the pane to an existing tab by stable tab ID
+        #[clap(long, value_parser, conflicts_with("new-tab"), required_unless_present("new-tab"))]
+        tab_id: Option<usize>,
+        /// Name the destination tab when creating a new tab
+        #[clap(long, value_parser, requires("new-tab"))]
+        name: Option<String>,
+        /// Target a specific pane by ID (eg. terminal_1, plugin_2, or 3)
+        #[clap(short, long, value_parser)]
+        pane_id: Option<String>,
+    },
     /// Clear all buffers for a focused pane
     Clear {
         /// Target a specific pane by ID (eg. terminal_1, plugin_2, or 3)
@@ -1592,6 +1614,29 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    fn parse_action(args: &[&str]) -> CliAction {
+        let mut full_args = vec!["zellij", "action"];
+        full_args.extend_from_slice(args);
+        let cli = CliArgs::try_parse_from(full_args).unwrap();
+        match cli.command {
+            Some(Command::Action(action)) => *action,
+            other => panic!("Expected Action, got {:?}", other),
+        }
+    }
+
+    fn parse_action_big_stack(args: &[&str]) -> CliAction {
+        let owned_args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let borrowed_args = owned_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
+                parse_action(&borrowed_args)
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
     fn parse_subscribe(args: &[&str]) -> SubscribeCli {
         let mut full_args = vec!["zellij"];
         full_args.extend_from_slice(args);
@@ -1658,4 +1703,31 @@ mod tests {
         let result = CliArgs::try_parse_from(["zellij", "subscribe"]);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn move_pane_to_tab_new_tab_parses_name_and_pane_id() {
+        let action = parse_action_big_stack(&[
+            "move-pane-to-tab",
+            "--new-tab",
+            "--name",
+            "scratch",
+            "--pane-id",
+            "terminal_7",
+        ]);
+        match action {
+            CliAction::MovePaneToTab {
+                new_tab,
+                tab_id,
+                name,
+                pane_id,
+            } => {
+                assert!(new_tab);
+                assert_eq!(tab_id, None);
+                assert_eq!(name.as_deref(), Some("scratch"));
+                assert_eq!(pane_id.as_deref(), Some("terminal_7"));
+            },
+            other => panic!("Expected MovePaneToTab, got {:?}", other),
+        }
+    }
+
 }

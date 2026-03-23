@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 
 use interprocess::local_socket::Stream as LocalSocketStream;
 use zellij_utils::{
@@ -116,6 +118,14 @@ impl ServerOsApi for FakeInputOutput {
 
     fn clear_terminal_id(&self, _terminal_id: u32) -> Result<()> {
         unimplemented!()
+    }
+
+    #[cfg(unix)]
+    fn register_terminal_raw_fd(&self, _terminal_id: u32, _raw_fd: RawFd) {}
+
+    #[cfg(unix)]
+    fn terminal_raw_fd(&self, _terminal_id: u32) -> Option<RawFd> {
+        None
     }
 
     fn send_sigint(&self, _pid: u32) -> Result<()> {
