@@ -31,6 +31,7 @@ use zellij_utils::{
         keybinds::Keybinds,
         layout::Layout,
     },
+    sessions::generate_unique_session_name,
     ipc::{
         ClientAttributes, ClientToServerMsg, ExitReason, IpcReceiverWithContext, ServerToClientMsg,
     },
@@ -464,6 +465,41 @@ pub(crate) fn route_action(
                         .with_context(err_context)?;
                 },
             }
+        },
+        Action::MovePaneToSession {
+            pane_id: action_pane_id,
+            new_session,
+            session_name,
+            tab_id,
+        } => {
+            let pane_id = action_pane_id
+                .map(Into::into)
+                .or(pane_id)
+                .with_context(|| {
+                    "failed to move pane to session: missing target pane id".to_string()
+                })?;
+            let target_session_name = if new_session {
+                session_name
+                    .or_else(generate_unique_session_name)
+                    .with_context(|| {
+                        "failed to generate a session name for move-pane-to-session".to_string()
+                    })?
+            } else {
+                session_name.with_context(|| {
+                    "failed to move pane to session: missing target session name".to_string()
+                })?
+            };
+            let notification_end = Some(NotificationEnd::new(completion_tx));
+            senders
+                .send_to_screen(ScreenInstruction::MovePaneToSession {
+                    pane_id,
+                    target_session_name,
+                    target_tab_id: tab_id,
+                    new_session,
+                    client_id,
+                    completion_tx: notification_end,
+                })
+                .with_context(err_context)?;
         },
         Action::ClearScreen => {
             senders
