@@ -102,6 +102,12 @@ impl AsyncReader for RawFdAsyncReader {
     }
 }
 
+pub(crate) fn async_reader_from_raw_fd(fd: RawFd) -> Result<Box<dyn AsyncReader>> {
+    Ok(Box::new(
+        RawFdAsyncReader::new(fd).map_err(|e| anyhow::anyhow!("failed to create async reader: {}", e))?,
+    ))
+}
+
 fn set_terminal_size_using_fd(
     fd: RawFd,
     columns: u16,
@@ -434,6 +440,21 @@ impl UnixPtyBackend {
             .lock()
             .unwrap()
             .insert(terminal_id, None);
+    }
+
+    pub fn register_terminal_raw_fd(&self, terminal_id: u32, raw_fd: RawFd) {
+        self.terminal_id_to_raw_fd
+            .lock()
+            .unwrap()
+            .insert(terminal_id, Some(raw_fd));
+    }
+
+    pub fn terminal_raw_fd(&self, terminal_id: u32) -> Option<RawFd> {
+        self.terminal_id_to_raw_fd
+            .lock()
+            .unwrap()
+            .get(&terminal_id)
+            .and_then(|fd| *fd)
     }
 
     pub fn clear_terminal_id(&self, terminal_id: u32) {

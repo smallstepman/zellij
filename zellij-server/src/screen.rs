@@ -36,7 +36,12 @@ use std::rc::Rc;
 use std::str;
 use std::time::{Duration, Instant};
 
-use crate::route::NotificationEnd;
+use crate::route::{wait_for_action_completion, NotificationEnd};
+#[cfg(unix)]
+use crate::session_transfer::{
+    bind_session_transfer_socket, recv_request_with_fds, send_response,
+    SessionTransferResponse,
+};
 
 use log::{debug, warn};
 use zellij_utils::data::{
@@ -353,6 +358,12 @@ pub enum ScreenInstruction {
     SetSelectable(PaneId, bool),
     ShowPluginCursor(u32, ClientId, Option<(usize, usize)>),
     ClosePane(
+        PaneId,
+        Option<ClientId>,
+        Option<NotificationEnd>,
+        Option<i32>,
+    ), // i32 -> optional exit
+    ClosePaneWithoutPty(
         PaneId,
         Option<ClientId>,
         Option<NotificationEnd>,
@@ -818,6 +829,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::SetSelectable(..) => ScreenContext::SetSelectable,
             ScreenInstruction::ShowPluginCursor(..) => ScreenContext::ShowPluginCursor,
             ScreenInstruction::ClosePane(..) => ScreenContext::ClosePane,
+            ScreenInstruction::ClosePaneWithoutPty(..) => ScreenContext::ClosePaneWithoutPty,
             ScreenInstruction::HoldPane(..) => ScreenContext::HoldPane,
             ScreenInstruction::UpdatePaneName(..) => ScreenContext::UpdatePaneName,
             ScreenInstruction::UndoRenamePane(..) => ScreenContext::UndoRenamePane,
@@ -4824,6 +4836,7 @@ pub(crate) fn screen_thread_main(
     let mut pending_events_waiting_for_client: Vec<ScreenInstruction> = vec![];
     let mut plugin_loading_message_cache = HashMap::new();
     let mut keybind_intercepts = HashMap::new();
+    let mut session_transfer_listener_started = false;
     loop {
         let (event, mut err_ctx) = screen
             .bus
@@ -5937,6 +5950,33 @@ pub(crate) fn screen_thread_main(
                 screen.log_and_report_session_state()?;
                 screen.retain_only_existing_panes_in_pane_groups();
             },
+            ScreenInstruction::ClosePaneWithoutPty(
+                id,
+                client_id,
+                _completion_tx, // the action ends here, dropping this will release anything
+                // waiting for it
+                exit_status,
+            ) => {
+                match client_id {
+                    Some(client_id) => {
+                        active_tab!(screen, client_id, |tab: &mut Tab| tab.close_pane(
+                            id,
+                            false,
+                            exit_status
+                        ));
+                    },
+                    None => {
+                        for tab in screen.tabs.values_mut() {
+                            if tab.get_all_pane_ids().contains(&id) {
+                                tab.close_pane(id, false, exit_status);
+                                break;
+                            }
+                        }
+                    },
+                }
+                screen.log_and_report_session_state()?;
+                screen.retain_only_existing_panes_in_pane_groups();
+            },
             ScreenInstruction::HoldPane(id, exit_status, run_command) => {
                 let is_first_run = false;
                 for tab in screen.tabs.values_mut() {
@@ -6388,6 +6428,105 @@ pub(crate) fn screen_thread_main(
                 pane_id_to_focus,
             ) => {
                 screen.add_client(client_id, is_web_client)?;
+                #[cfg(unix)]
+                if !session_transfer_listener_started {
+                    session_transfer_listener_started = true;
+                    let session_name = screen.session_name.clone();
+                    let senders = screen.bus.senders.clone();
+                    let destination_client_id = client_id;
+                    let destination_is_web_client = is_web_client;
+                    std::thread::spawn(move || {
+                        if session_name.is_empty() {
+                            return;
+                        }
+
+                        let listener = match bind_session_transfer_socket(&session_name) {
+                            Ok(listener) => listener,
+                            Err(err) => {
+                                log::error!(
+                                    "Failed to bind session transfer socket for {}: {}",
+                                    session_name,
+                                    err
+                                );
+                                return;
+                            },
+                        };
+
+                        for incoming in listener.incoming() {
+                            let mut stream = match incoming {
+                                Ok(stream) => stream,
+                                Err(err) => {
+                                    log::error!(
+                                        "Failed to accept session transfer connection for {}: {}",
+                                        session_name,
+                                        err
+                                    );
+                                    continue;
+                                },
+                            };
+
+                            let (request, raw_fds) = match recv_request_with_fds(&stream) {
+                                Ok(request) => request,
+                                Err(err) => {
+                                    let _ = send_response(
+                                        &mut stream,
+                                        &SessionTransferResponse {
+                                            success: false,
+                                            error: Some(err.to_string()),
+                                        },
+                                    );
+                                    log::error!(
+                                        "Failed to decode session transfer request for {}: {}",
+                                        session_name,
+                                        err
+                                    );
+                                    continue;
+                                },
+                            };
+
+                            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+                            if let Err(err) = senders.send_to_pty(PtyInstruction::AdoptTransferredPanes {
+                                destination_client_id,
+                                destination_is_web_client,
+                                request,
+                                raw_fds,
+                                completion_tx: Some(NotificationEnd::new(completion_tx)),
+                            }) {
+                                let _ = send_response(
+                                    &mut stream,
+                                    &SessionTransferResponse {
+                                        success: false,
+                                        error: Some(err.to_string()),
+                                    },
+                                );
+                                log::error!(
+                                    "Failed to queue transferred panes for {}: {}",
+                                    session_name,
+                                    err
+                                );
+                                continue;
+                            }
+
+                            let completion = wait_for_action_completion(
+                                completion_rx,
+                                "adopt transferred panes",
+                                true,
+                            );
+                            let response = SessionTransferResponse {
+                                success: completion.exit_status.unwrap_or(0) == 0
+                                    && completion.error_message.is_none(),
+                                error: completion.error_message,
+                            };
+                            if let Err(err) = send_response(&mut stream, &response) {
+                                log::error!(
+                                    "Failed to send session transfer response for {}: {}",
+                                    session_name,
+                                    err
+                                );
+                            }
+                        }
+                    });
+                }
                 let pane_id = pane_id_to_focus.map(|(pane_id, is_plugin)| {
                     if is_plugin {
                         PaneId::Plugin(pane_id)

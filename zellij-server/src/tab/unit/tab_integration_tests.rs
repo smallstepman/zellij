@@ -9,6 +9,8 @@ use crate::{
 };
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 use std::sync::Mutex;
 
 use zellij_utils::channels::Receiver;
@@ -79,6 +81,12 @@ impl ServerOsApi for FakeInputOutput {
     }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         unimplemented!()
+    }
+    #[cfg(unix)]
+    fn register_terminal_raw_fd(&self, _terminal_id: u32, _raw_fd: RawFd) {}
+    #[cfg(unix)]
+    fn terminal_raw_fd(&self, _terminal_id: u32) -> Option<RawFd> {
+        None
     }
     fn kill(&self, _pid: u32) -> Result<()> {
         unimplemented!()
