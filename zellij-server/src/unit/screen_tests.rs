@@ -6988,6 +6988,106 @@ pub fn fresh_session_starts_session_transfer_listener_without_later_attach() {
 }
 
 #[test]
+pub fn renaming_session_moves_session_transfer_listener_socket() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % 1_000_000_000;
+    let old_session_name = format!("zt-old-{unique_suffix:x}");
+    let new_session_name = format!("zt-new-{unique_suffix:x}");
+    let old_socket_path =
+        zellij_utils::consts::session_transfer_socket_file_name(old_session_name.as_str());
+    let new_socket_path =
+        zellij_utils::consts::session_transfer_socket_file_name(new_session_name.as_str());
+    let _ = std::fs::remove_file(&old_socket_path);
+    let _ = std::fs::remove_file(&new_socket_path);
+
+    let mut mock_screen = MockScreen::new_with_session_name(size, old_session_name);
+    let screen_thread = mock_screen.run(None, vec![]);
+
+    let listener_started = (0..20).any(|_| {
+        if old_socket_path.exists() {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+            false
+        }
+    });
+    assert!(listener_started, "expected transfer listener to start before rename");
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::RenameSession(
+        new_session_name,
+        mock_screen.main_client_id,
+        None,
+    ));
+
+    let listener_renamed = (0..20).any(|_| {
+        if new_socket_path.exists() && !old_socket_path.exists() {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+            false
+        }
+    });
+
+    mock_screen.teardown(vec![screen_thread]);
+    assert!(
+        listener_renamed,
+        "renaming a session should move the transfer listener socket to the new session path"
+    );
+}
+
+#[test]
+pub fn renaming_session_immediately_after_startup_moves_transfer_listener_socket() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % 1_000_000_000;
+    let old_session_name = format!("zt-now-{unique_suffix:x}");
+    let new_session_name = format!("zt-next-{unique_suffix:x}");
+    let old_socket_path =
+        zellij_utils::consts::session_transfer_socket_file_name(old_session_name.as_str());
+    let new_socket_path =
+        zellij_utils::consts::session_transfer_socket_file_name(new_session_name.as_str());
+    let _ = std::fs::remove_file(&old_socket_path);
+    let _ = std::fs::remove_file(&new_socket_path);
+
+    let mut mock_screen = MockScreen::new_with_session_name(size, old_session_name);
+    let screen_thread = mock_screen.run(None, vec![]);
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::RenameSession(
+        new_session_name,
+        mock_screen.main_client_id,
+        None,
+    ));
+
+    let listener_renamed = (0..20).any(|_| {
+        if new_socket_path.exists() && !old_socket_path.exists() {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+            false
+        }
+    });
+
+    mock_screen.teardown(vec![screen_thread]);
+    assert!(
+        listener_renamed,
+        "renaming immediately after startup should still move the transfer listener socket"
+    );
+}
+
+#[test]
 pub fn send_cli_clear_with_pane_id() {
     let size = Size {
         cols: 121,

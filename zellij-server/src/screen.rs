@@ -62,7 +62,7 @@ use zellij_utils::ipc::{ExitReason, ServerToClientMsg};
 use zellij_utils::pane_size::{PaneGeom, Size, SizeInPixels};
 use zellij_utils::shared::clean_string_from_control_and_linebreak;
 use zellij_utils::{
-    consts::{session_info_folder_for_session, ZELLIJ_SOCK_DIR},
+    consts::{session_info_folder_for_session, session_transfer_socket_file_name, ZELLIJ_SOCK_DIR},
     envs::set_session_name,
     input::command::TerminalAction,
     input::layout::{
@@ -4762,20 +4762,19 @@ fn start_session_transfer_listener(
     if *session_transfer_listener_started || session_name.is_empty() {
         return;
     }
+    let listener = match bind_session_transfer_socket(&session_name) {
+        Ok(listener) => listener,
+        Err(err) => {
+            log::error!(
+                "Failed to bind session transfer socket for {}: {}",
+                session_name,
+                err
+            );
+            return;
+        },
+    };
     *session_transfer_listener_started = true;
     std::thread::spawn(move || {
-        let listener = match bind_session_transfer_socket(&session_name) {
-            Ok(listener) => listener,
-            Err(err) => {
-                log::error!(
-                    "Failed to bind session transfer socket for {}: {}",
-                    session_name,
-                    err
-                );
-                return;
-            },
-        };
-
         for incoming in listener.incoming() {
             let mut stream = match incoming {
                 Ok(stream) => stream,
@@ -8009,6 +8008,17 @@ pub(crate) fn screen_thread_main(
                     let new_socket_file_path = ZELLIJ_SOCK_DIR.join(&name);
                     if let Err(e) = std::fs::rename(old_socket_file_path, new_socket_file_path) {
                         log::error!("Failed to rename ipc socket: {:?}", e);
+                    }
+
+                    let old_transfer_socket_file_path =
+                        session_transfer_socket_file_name(&old_session_name);
+                    let new_transfer_socket_file_path =
+                        session_transfer_socket_file_name(&name);
+                    if let Err(e) = std::fs::rename(
+                        old_transfer_socket_file_path,
+                        new_transfer_socket_file_path,
+                    ) {
+                        log::error!("Failed to rename session transfer socket: {:?}", e);
                     }
 
                     // rename session_info folder (TODO: make this atomic, right now there is a

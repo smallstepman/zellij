@@ -4,6 +4,7 @@ use crate::home::find_default_config_dir;
 use directories::ProjectDirs;
 use include_dir::{include_dir, Dir};
 use lazy_static::lazy_static;
+use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::OnceLock};
 use uuid::Uuid;
 
@@ -38,7 +39,17 @@ pub fn session_info_folder_for_session(session_name: &str) -> PathBuf {
 }
 
 pub fn session_transfer_socket_file_name(session_name: &str) -> PathBuf {
-    session_info_folder_for_session(session_name).join("session-transfer.sock")
+    let digest = Sha256::digest(session_name.as_bytes());
+    let digest_prefix: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    // Keep the transfer socket under the session temp dir, not beside the main
+    // IPC sockets, so it stays short on macOS and cannot collide with a normal
+    // session socket name.
+    ZELLIJ_TMP_DIR
+        .join("session-transfer")
+        .join(format!("st-{digest_prefix}"))
 }
 
 pub fn create_config_and_cache_folders() {
@@ -333,5 +344,27 @@ mod not_unix {
             ipc_dir
         };
         pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{session_transfer_socket_file_name, ZELLIJ_TMP_DIR};
+
+    #[test]
+    fn session_transfer_socket_path_fits_macos_socket_limit() {
+        let socket_path = session_transfer_socket_file_name("exquisite-newt");
+        let expected_parent = ZELLIJ_TMP_DIR.join("session-transfer");
+        assert!(
+            socket_path.starts_with(&expected_parent),
+            "session transfer socket should live under the dedicated temp transfer dir on macOS: {}",
+            socket_path.display()
+        );
+        assert!(
+            socket_path.as_os_str().len() < 104,
+            "session transfer socket path must fit macOS sockaddr_un.sun_path: {} ({} bytes)",
+            socket_path.display(),
+            socket_path.as_os_str().len()
+        );
     }
 }
