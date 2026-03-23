@@ -2,7 +2,13 @@ use crate::background_jobs::write_session_state_to_disk;
 use crate::background_jobs::BackgroundJob;
 use crate::global_async_runtime::get_tokio_runtime as async_runtime;
 use crate::os_input_output::{AsyncReader, NullAsyncReader};
-use crate::route::NotificationEnd;
+use crate::route::{wait_for_action_completion, NotificationEnd};
+#[cfg(unix)]
+use crate::session_transfer::{
+    connect_session_transfer_socket, recv_response, seed_bytes_from_pane_contents,
+    send_request_with_fds, spawn_detached_session,
+};
+use crate::session_transfer::{SessionTransferRequest, TransferKind};
 use crate::terminal_bytes::TerminalBytes;
 use crate::{
     panes::PaneId,
@@ -13,7 +19,7 @@ use crate::{
     ClientId, ServerInstruction,
 };
 use std::sync::Arc;
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use zellij_utils::{
     data::{
@@ -25,8 +31,8 @@ use zellij_utils::{
     input::{
         command::{OpenFilePayload, RunCommand, TerminalAction},
         layout::{
-            FloatingPaneLayout, Layout, Run, RunPluginOrAlias, SwapFloatingLayout, SwapTiledLayout,
-            TabLayoutInfo, TiledPaneLayout,
+            FloatingPaneLayout, Layout, PercentOrFixed, Run, RunPluginOrAlias, SwapFloatingLayout,
+            SwapTiledLayout, TabLayoutInfo, TiledPaneLayout,
         },
     },
     pane_size::Size,
@@ -115,6 +121,14 @@ pub enum PtyInstruction {
         session_layout_metadata: SessionLayoutMetadata,
         completion_tx: Option<NotificationEnd>,
     },
+    TransferPanesToSession(SessionTransferRequest, Option<NotificationEnd>),
+    AdoptTransferredPanes {
+        destination_client_id: ClientId,
+        destination_is_web_client: bool,
+        request: SessionTransferRequest,
+        raw_fds: Vec<i32>,
+        completion_tx: Option<NotificationEnd>,
+    },
     FillPluginCwd(
         Option<bool>,   // should float
         bool,           // should be opened in place
@@ -166,6 +180,8 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::GoToTab(..) => PtyContext::GoToTab,
             PtyInstruction::ClosePane(..) => PtyContext::ClosePane,
             PtyInstruction::CloseTab(_) => PtyContext::CloseTab,
+            PtyInstruction::TransferPanesToSession(..) => PtyContext::TransferPanesToSession,
+            PtyInstruction::AdoptTransferredPanes { .. } => PtyContext::AdoptTransferredPanes,
             PtyInstruction::NewTab(..) => PtyContext::NewTab,
             PtyInstruction::OverrideLayout(..) => PtyContext::OverrideLayout,
             PtyInstruction::ReRunCommandInPane(..) => PtyContext::ReRunCommandInPane,
@@ -815,6 +831,127 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                         log::error!("Failed to serialize layout: {}", e);
                     },
                 };
+            },
+            PtyInstruction::TransferPanesToSession(request, completion_tx) => {
+                #[cfg(unix)]
+                {
+                    let target_session_name = request.target_session_name.clone();
+                    let err_context = || {
+                        format!(
+                            "failed to transfer panes to session {}",
+                            target_session_name
+                        )
+                    };
+                    let mut request = request;
+                    let mut raw_fds = Vec::with_capacity(request.panes.len());
+                    for pane in request.panes.iter_mut() {
+                        let terminal_id = pane.pane_info.id;
+                        let child_pid = pty.id_to_child_pid.get(&terminal_id).copied();
+                        if pane.pane_info.is_plugin
+                            || pane.pane_info.is_held
+                            || pane.pane_info.is_suppressed
+                            || pane.pane_info.exited
+                            || child_pid.is_none()
+                        {
+                            return Err(anyhow::anyhow!(
+                                "only live terminal panes can be transferred between sessions"
+                            ))
+                            .with_context(err_context);
+                        }
+                        pane.child_pid = child_pid;
+                        let raw_fd = pty
+                            .bus
+                            .os_input
+                            .as_ref()
+                            .context("no OS I/O interface found")
+                            .and_then(|os_input| {
+                                os_input.terminal_raw_fd(terminal_id).context(format!(
+                                    "failed to find raw fd for transferred terminal {terminal_id}"
+                                ))
+                            })
+                            .with_context(err_context)?;
+                        raw_fds.push(raw_fd);
+                    }
+
+                    if request.new_session {
+                        spawn_detached_session(&request.target_session_name).with_context(err_context)?;
+                    }
+
+                    let mut destination_stream = connect_session_transfer_socket(
+                        &request.target_session_name,
+                        Duration::from_secs(10),
+                    )
+                    .with_context(err_context)?;
+                    send_request_with_fds(&destination_stream, &request, &raw_fds)
+                        .with_context(err_context)?;
+                    let response = recv_response(&mut destination_stream)
+                        .with_context(err_context)?;
+                    if !response.success {
+                        let error_message = response.error.unwrap_or_else(|| {
+                            "destination session rejected transferred panes".to_string()
+                        });
+                        if let Some(mut completion_tx) = completion_tx {
+                            completion_tx.set_exit_status(1);
+                            completion_tx.set_error_message(error_message.clone());
+                        }
+                        return Err(anyhow::anyhow!(error_message)).with_context(err_context);
+                    }
+
+                    let mut completion_tx = completion_tx;
+                    for (index, pane) in request.panes.iter().enumerate() {
+                        pty.detach_terminal_pane(pane.pane_info.id)
+                            .with_context(err_context)?;
+                        let is_last = index == request.panes.len() - 1;
+                        let completion = if is_last { completion_tx.take() } else { None };
+                        pty.bus
+                            .senders
+                            .send_to_screen(crate::screen::ScreenInstruction::ClosePaneWithoutPty(
+                                PaneId::Terminal(pane.pane_info.id),
+                                None,
+                                completion,
+                                None,
+                            ))
+                            .with_context(err_context)?;
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = completion_tx;
+                    return Err(anyhow::anyhow!(
+                        "move-pane-to-session is only supported on Unix"
+                    ));
+                }
+            },
+            PtyInstruction::AdoptTransferredPanes {
+                destination_client_id,
+                destination_is_web_client,
+                request,
+                raw_fds,
+                completion_tx,
+            } => {
+                #[cfg(unix)]
+                {
+                    pty.adopt_transferred_panes(
+                        destination_client_id,
+                        destination_is_web_client,
+                        request,
+                        raw_fds,
+                        completion_tx,
+                    )?;
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = (
+                        destination_client_id,
+                        destination_is_web_client,
+                        request,
+                        raw_fds,
+                        completion_tx,
+                    );
+                    return Err(anyhow::anyhow!(
+                        "transferring panes between sessions is only supported on Unix"
+                    ));
+                }
             },
             PtyInstruction::FillPluginCwd(
                 should_float,
@@ -1790,6 +1927,215 @@ impl Pty {
         }
         Ok(())
     }
+
+    #[cfg(unix)]
+    fn detach_terminal_pane(&mut self, terminal_id: u32) -> Result<()> {
+        if let Some(handle) = self.task_handles.remove(&terminal_id) {
+            handle.abort();
+        }
+        let _ = self.id_to_child_pid.remove(&terminal_id);
+        let _ = self.originating_plugins.remove(&terminal_id);
+        let _ = self.terminal_cwds.remove(&terminal_id);
+        self.bus
+            .os_input
+            .as_ref()
+            .context("no OS I/O interface found")
+            .and_then(|os_input| os_input.clear_terminal_id(terminal_id))
+            .with_context(|| format!("failed to detach terminal {terminal_id}"))?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn adopt_transferred_panes(
+        &mut self,
+        destination_client_id: ClientId,
+        destination_is_web_client: bool,
+        request: SessionTransferRequest,
+        raw_fds: Vec<i32>,
+        completion_tx: Option<NotificationEnd>,
+    ) -> Result<()> {
+        let target_session_name = request.target_session_name.clone();
+        let err_context = || {
+            format!(
+                "failed to adopt transferred panes into session {}",
+                target_session_name
+            )
+        };
+
+        if raw_fds.len() != request.panes.len() {
+            return Err(anyhow::anyhow!(
+                "expected {} transferred fds, got {}",
+                request.panes.len(),
+                raw_fds.len()
+            ))
+            .with_context(err_context);
+        }
+
+        if request.transfer_kind == TransferKind::Pane && request.panes.len() != 1 {
+            return Err(anyhow::anyhow!(
+                "pane transfer requests must contain exactly one pane"
+            ))
+            .with_context(err_context);
+        }
+
+        if request.transfer_kind == TransferKind::Tab {
+            if !request.new_session {
+                let (completion_tx_for_new_tab, completion_rx_for_new_tab) =
+                    tokio::sync::oneshot::channel();
+                self.bus
+                    .senders
+                    .send_to_screen(ScreenInstruction::NewTab(
+                        None,
+                        None,
+                        None,
+                        vec![],
+                        None,
+                        (vec![], vec![]),
+                        None,
+                        false,
+                        true,
+                        (destination_client_id, destination_is_web_client),
+                        Some(NotificationEnd::new(completion_tx_for_new_tab)),
+                    ))
+                    .with_context(err_context)?;
+                let result = wait_for_action_completion(
+                    completion_rx_for_new_tab,
+                    "transfer tab new tab",
+                    true,
+                );
+                if let Some(error_message) = result.error_message {
+                    return Err(anyhow::anyhow!(error_message)).with_context(err_context);
+                }
+                self.bus
+                    .senders
+                    .send_to_screen(ScreenInstruction::CloseFocusedPane(
+                        destination_client_id,
+                        None,
+                    ))
+                    .with_context(err_context)?;
+            } else {
+                self.bus
+                    .senders
+                    .send_to_screen(ScreenInstruction::CloseFocusedPane(
+                        destination_client_id,
+                        None,
+                    ))
+                    .with_context(err_context)?;
+            }
+        } else if request.new_session {
+            self.bus
+                .senders
+                .send_to_screen(ScreenInstruction::CloseFocusedPane(
+                    destination_client_id,
+                    None,
+                ))
+                .with_context(err_context)?;
+        }
+
+        let client_or_tab_index = if let Some(target_tab_id) = request.target_tab_id {
+            ClientTabIndexOrPaneId::TabIndex(target_tab_id)
+        } else {
+            ClientTabIndexOrPaneId::ClientId(destination_client_id)
+        };
+
+        let mut transferred_panes = request.panes;
+        transferred_panes.sort_by_key(|pane| pane.pane_info.is_focused);
+
+        for (pane, raw_fd) in transferred_panes.into_iter().zip(raw_fds.into_iter()) {
+            if pane.pane_info.is_plugin
+                || pane.pane_info.is_held
+                || pane.pane_info.is_suppressed
+                || pane.pane_info.exited
+            {
+                return Err(anyhow::anyhow!(
+                    "only live terminal panes can be transferred between sessions"
+                ))
+                .with_context(err_context);
+            }
+            let new_terminal_id = self
+                .bus
+                .os_input
+                .as_ref()
+                .context("no OS I/O interface found")
+                .and_then(|os_input| os_input.reserve_terminal_id())
+                .with_context(err_context)?;
+
+            self.bus
+                .os_input
+                .as_ref()
+                .context("no OS I/O interface found")
+                .with_context(err_context)?
+                .register_terminal_raw_fd(new_terminal_id, raw_fd);
+
+            let reader = crate::os_input_output_unix::async_reader_from_raw_fd(raw_fd)
+                .map_err(|e| anyhow::anyhow!("failed to adopt transferred fd: {e}"))?;
+            let new_pane_id = PaneId::Terminal(new_terminal_id);
+            let borderless = Some(
+                pane.pane_info.pane_rows == pane.pane_info.pane_content_rows
+                    && pane.pane_info.pane_columns == pane.pane_info.pane_content_columns,
+            );
+            let new_pane_placement = if pane.pane_info.is_floating {
+                let floating_coordinates = FloatingPaneCoordinates {
+                    x: Some(PercentOrFixed::Fixed(pane.pane_info.pane_x)),
+                    y: Some(PercentOrFixed::Fixed(pane.pane_info.pane_y)),
+                    width: Some(PercentOrFixed::Fixed(pane.pane_info.pane_columns)),
+                    height: Some(PercentOrFixed::Fixed(pane.pane_info.pane_rows)),
+                    pinned: None,
+                    borderless,
+                };
+                NewPanePlacement::Floating(Some(floating_coordinates))
+            } else {
+                NewPanePlacement::Tiled {
+                    direction: None,
+                    borderless,
+                }
+            };
+
+            self.bus
+                .senders
+                .send_to_screen(ScreenInstruction::NewPane(
+                    new_pane_id,
+                    Some(pane.pane_info.title.clone()),
+                    None,
+                    pane.invoked_with.clone(),
+                    new_pane_placement,
+                    false,
+                    client_or_tab_index,
+                    None,
+                    false,
+                ))
+                .with_context(err_context)?;
+
+            let seed_bytes = seed_bytes_from_pane_contents(&pane.pane_contents);
+            if !seed_bytes.is_empty() {
+                self.bus
+                    .senders
+                    .send_to_screen(ScreenInstruction::PtyBytes(new_terminal_id, seed_bytes))
+                    .with_context(err_context)?;
+            }
+
+            let terminal_bytes = async_runtime().spawn({
+                let senders = self.bus.senders.clone();
+                let debug_to_file = self.debug_to_file;
+                async move {
+                    TerminalBytes::new(new_terminal_id, reader, senders, debug_to_file)
+                        .listen()
+                        .await
+                        .context("failed to listen for transferred pane bytes")
+                        .fatal();
+                }
+            });
+            self.task_handles.insert(new_terminal_id, terminal_bytes);
+            if let Some(child_pid) = pane.child_pid {
+                self.id_to_child_pid.insert(new_terminal_id, child_pid);
+                self.capture_initial_cwd(new_terminal_id, child_pid);
+            }
+        }
+
+        drop(completion_tx);
+        Ok(())
+    }
+
     pub fn close_tab(&mut self, ids: Vec<PaneId>) -> Result<()> {
         for id in ids {
             self.close_pane(id)

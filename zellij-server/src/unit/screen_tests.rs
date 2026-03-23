@@ -27,6 +27,8 @@ use crate::background_jobs::BackgroundJob;
 use crate::os_input_output::AsyncReader;
 use crate::pty_writer::PtyWriteInstruction;
 use std::env::set_var;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -198,7 +200,14 @@ impl ServerOsApi for FakeInputOutput {
     }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         unimplemented!()
-    }    fn kill(&self, _pid: u32) -> Result<()> {
+    }
+    #[cfg(unix)]
+    fn register_terminal_raw_fd(&self, _terminal_id: u32, _raw_fd: RawFd) {}
+    #[cfg(unix)]
+    fn terminal_raw_fd(&self, _terminal_id: u32) -> Option<RawFd> {
+        None
+    }
+    fn kill(&self, _pid: u32) -> Result<()> {
         unimplemented!()
     }
     fn force_kill(&self, _pid: u32) -> Result<()> {

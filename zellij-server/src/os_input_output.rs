@@ -315,6 +315,10 @@ pub trait ServerOsApi: Send + Sync {
     fn write_to_tty_stdin(&self, terminal_id: u32, buf: &[u8]) -> Result<usize>;
     /// Wait until all output written to the terminal has been transmitted.
     fn tcdrain(&self, terminal_id: u32) -> Result<()>;
+    #[cfg(unix)]
+    fn register_terminal_raw_fd(&self, terminal_id: u32, raw_fd: std::os::unix::io::RawFd);
+    #[cfg(unix)]
+    fn terminal_raw_fd(&self, terminal_id: u32) -> Option<std::os::unix::io::RawFd>;
     /// Terminate the process with process ID `pid`. (SIGHUP)
     fn kill(&self, pid: u32) -> Result<()>;
     /// Terminate the process with process ID `pid`. (SIGKILL)
@@ -415,6 +419,15 @@ impl ServerOsApi for ServerOsInputOutput {
     }
     fn tcdrain(&self, terminal_id: u32) -> Result<()> {
         self.pty_backend.tcdrain(terminal_id)
+    }
+    #[cfg(unix)]
+    fn register_terminal_raw_fd(&self, terminal_id: u32, raw_fd: std::os::unix::io::RawFd) {
+        self.pty_backend
+            .register_terminal_raw_fd(terminal_id, raw_fd);
+    }
+    #[cfg(unix)]
+    fn terminal_raw_fd(&self, terminal_id: u32) -> Option<std::os::unix::io::RawFd> {
+        self.pty_backend.terminal_raw_fd(terminal_id)
     }
     fn box_clone(&self) -> Box<dyn ServerOsApi> {
         Box::new((*self).clone())

@@ -37,6 +37,10 @@ pub fn session_info_folder_for_session(session_name: &str) -> PathBuf {
     ZELLIJ_SESSION_INFO_CACHE_DIR.join(session_name)
 }
 
+pub fn session_transfer_socket_file_name(session_name: &str) -> PathBuf {
+    session_info_folder_for_session(session_name).join("session-transfer.sock")
+}
+
 pub fn create_config_and_cache_folders() {
     if let Err(e) = std::fs::create_dir_all(&ZELLIJ_CACHE_DIR.as_path()) {
         log::error!("Failed to create cache dir: {:?}", e);
