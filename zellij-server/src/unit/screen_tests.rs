@@ -6639,6 +6639,59 @@ pub fn send_cli_move_pane_to_existing_tab_with_pane_id() {
 }
 
 #[test]
+pub fn send_cli_move_pane_to_existing_session_with_pane_id() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 10;
+    let mut mock_screen = MockScreen::new(size);
+    let screen_receiver = mock_screen.screen_receiver.take().unwrap();
+    let session_metadata = mock_screen.clone_session_metadata();
+    let captured_instruction = Arc::new(Mutex::new(None));
+    let captured_instruction_for_thread = captured_instruction.clone();
+    let screen_thread = std::thread::spawn(move || {
+        let (instruction, _err_ctx) = screen_receiver.recv().unwrap();
+        *captured_instruction_for_thread.lock().unwrap() = Some(instruction.clone());
+    });
+    let cli_action = CliAction::MovePaneToSession {
+        pane_id: None,
+        new_session: false,
+        target_session_name: Some("target-session".to_string()),
+        tab_id: Some(3),
+    };
+
+    send_cli_action_to_server_with_pane_id(
+        &session_metadata,
+        cli_action,
+        client_id,
+        Some(PaneId::Terminal(1)),
+    );
+
+    screen_thread.join().unwrap();
+    let instruction = captured_instruction
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("screen instruction should be captured");
+    assert!(matches!(
+        instruction,
+        ScreenInstruction::MovePaneToSession {
+            pane_id,
+            target_session_name: ref name,
+            target_tab_id: Some(3),
+            new_session: false,
+            client_id: instruction_client_id,
+            completion_tx: Some(_),
+        } if pane_id == PaneId::Terminal(1)
+            && name == "target-session"
+            && instruction_client_id == client_id
+    ));
+
+    mock_screen.teardown(vec![]);
+}
+
+#[test]
 pub fn send_cli_clear_with_pane_id() {
     let size = Size {
         cols: 121,
