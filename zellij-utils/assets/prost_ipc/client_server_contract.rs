@@ -119,7 +119,7 @@ pub struct RgbColor {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Action {
-    #[prost(oneof="action::ActionType", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136")]
+    #[prost(oneof="action::ActionType", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137")]
     pub action_type: ::core::option::Option<action::ActionType>,
 }
 /// Nested message and enum types in `Action`.
@@ -401,9 +401,11 @@ pub mod action {
         MovePaneToTab(super::MovePaneToTabAction),
         #[prost(message, tag="136")]
         MovePaneToSession(super::MovePaneToSessionAction),
+        #[prost(message, tag="137")]
+        MoveTabToSession(super::MoveTabToSessionAction),
     }
 }
-// Action message definitions (all 94 variants)
+// Action message definitions (all 92 variants)
 
 /// Simple action types (no data)
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -611,6 +613,36 @@ pub struct BreakPaneRightAction {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BreakPaneLeftAction {
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MovePaneToTabAction {
+    #[prost(message, optional, tag="1")]
+    pub pane_id: ::core::option::Option<PaneId>,
+    #[prost(uint64, optional, tag="2")]
+    pub tab_id: ::core::option::Option<u64>,
+    #[prost(string, optional, tag="3")]
+    pub new_tab_name: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MovePaneToSessionAction {
+    #[prost(message, optional, tag="1")]
+    pub pane_id: ::core::option::Option<PaneId>,
+    #[prost(bool, tag="2")]
+    pub new_session: bool,
+    #[prost(string, optional, tag="3")]
+    pub session_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag="4")]
+    pub tab_id: ::core::option::Option<u64>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MoveTabToSessionAction {
+    #[prost(bool, tag="1")]
+    pub new_session: bool,
+    #[prost(string, optional, tag="2")]
+    pub session_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2061,28 +2093,6 @@ pub struct MoveTabByTabIdAction {
     pub id: u64,
     #[prost(enumeration="Direction", tag="2")]
     pub direction: i32,
-}
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MovePaneToTabAction {
-    #[prost(message, optional, tag="1")]
-    pub pane_id: ::core::option::Option<PaneId>,
-    #[prost(uint64, optional, tag="2")]
-    pub tab_id: ::core::option::Option<u64>,
-    #[prost(string, optional, tag="3")]
-    pub new_tab_name: ::core::option::Option<::prost::alloc::string::String>,
-}
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MovePaneToSessionAction {
-    #[prost(message, optional, tag="1")]
-    pub pane_id: ::core::option::Option<PaneId>,
-    #[prost(bool, tag="2")]
-    pub new_session: bool,
-    #[prost(string, optional, tag="3")]
-    pub session_name: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(uint64, optional, tag="4")]
-    pub tab_id: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
