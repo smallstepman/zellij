@@ -103,9 +103,9 @@ impl AsyncReader for RawFdAsyncReader {
 }
 
 pub(crate) fn async_reader_from_raw_fd(fd: RawFd) -> Result<Box<dyn AsyncReader>> {
-    Ok(Box::new(
-        RawFdAsyncReader::new(fd).map_err(|e| anyhow::anyhow!("failed to create async reader: {}", e))?,
-    ))
+    Ok(Box::new(RawFdAsyncReader::new(fd).map_err(|e| {
+        anyhow::anyhow!("failed to create async reader: {}", e)
+    })?))
 }
 
 fn set_terminal_size_using_fd(

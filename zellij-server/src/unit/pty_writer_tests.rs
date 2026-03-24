@@ -4,9 +4,9 @@ use crate::panes::PaneId;
 use crate::thread_bus::Bus;
 use interprocess::local_socket::Stream as LocalSocketStream;
 use std::collections::HashMap;
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use zellij_utils::channels::SenderWithContext;
 use zellij_utils::data::Palette;
@@ -134,6 +134,22 @@ impl ServerOsApi for MockServerOsApi {
             .unwrap()
             .get(&terminal_id)
             .copied()
+    }
+    #[cfg(windows)]
+    fn clone_terminal_transfer_handles(
+        &self,
+        _terminal_id: u32,
+        _target_pid: u32,
+    ) -> Result<crate::session_transfer::WindowsTransferredPtyHandles> {
+        unimplemented!()
+    }
+    #[cfg(windows)]
+    fn adopt_terminal_transfer_handles(
+        &self,
+        _terminal_id: u32,
+        _handles: crate::session_transfer::WindowsTransferredPtyHandles,
+    ) -> Result<Box<dyn AsyncReader>> {
+        unimplemented!()
     }
     fn kill(&self, _pid: u32) -> Result<()> {
         Ok(())

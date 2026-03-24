@@ -834,8 +834,8 @@ impl From<crate::input::actions::Action>
             MovePaneBackwardsAction,
             MovePaneBackwardsByPaneIdAction,
             MovePaneByPaneIdAction,
-            MovePaneToTabAction,
             MovePaneToSessionAction,
+            MovePaneToTabAction,
             MoveTabAction,
             MoveTabByTabIdAction,
             MoveTabToSessionAction,
@@ -2659,10 +2659,12 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     tab_id: a.tab_id.map(|id| id as usize),
                 })
             },
-            ActionType::MoveTabToSession(a) => Ok(crate::input::actions::Action::MoveTabToSession {
-                new_session: a.new_session,
-                session_name: a.session_name,
-            }),
+            ActionType::MoveTabToSession(a) => {
+                Ok(crate::input::actions::Action::MoveTabToSession {
+                    new_session: a.new_session,
+                    session_name: a.session_name,
+                })
+            },
         }
     }
 }

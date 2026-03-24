@@ -1,4 +1,4 @@
-use crate::{panes::PaneId, ClientId};
+use crate::{panes::PaneId, session_transfer::WindowsTransferredPtyHandles, ClientId};
 
 use interprocess::local_socket::Stream as LocalSocketStream;
 
@@ -319,6 +319,18 @@ pub trait ServerOsApi: Send + Sync {
     fn register_terminal_raw_fd(&self, terminal_id: u32, raw_fd: std::os::unix::io::RawFd);
     #[cfg(unix)]
     fn terminal_raw_fd(&self, terminal_id: u32) -> Option<std::os::unix::io::RawFd>;
+    #[cfg(windows)]
+    fn clone_terminal_transfer_handles(
+        &self,
+        terminal_id: u32,
+        target_pid: u32,
+    ) -> Result<WindowsTransferredPtyHandles>;
+    #[cfg(windows)]
+    fn adopt_terminal_transfer_handles(
+        &self,
+        terminal_id: u32,
+        handles: WindowsTransferredPtyHandles,
+    ) -> Result<Box<dyn AsyncReader>>;
     /// Terminate the process with process ID `pid`. (SIGHUP)
     fn kill(&self, pid: u32) -> Result<()>;
     /// Terminate the process with process ID `pid`. (SIGKILL)
@@ -428,6 +440,24 @@ impl ServerOsApi for ServerOsInputOutput {
     #[cfg(unix)]
     fn terminal_raw_fd(&self, terminal_id: u32) -> Option<std::os::unix::io::RawFd> {
         self.pty_backend.terminal_raw_fd(terminal_id)
+    }
+    #[cfg(windows)]
+    fn clone_terminal_transfer_handles(
+        &self,
+        terminal_id: u32,
+        target_pid: u32,
+    ) -> Result<WindowsTransferredPtyHandles> {
+        self.pty_backend
+            .clone_terminal_transfer_handles(terminal_id, target_pid)
+    }
+    #[cfg(windows)]
+    fn adopt_terminal_transfer_handles(
+        &self,
+        terminal_id: u32,
+        handles: WindowsTransferredPtyHandles,
+    ) -> Result<Box<dyn AsyncReader>> {
+        self.pty_backend
+            .adopt_terminal_transfer_handles(terminal_id, handles)
     }
     fn box_clone(&self) -> Box<dyn ServerOsApi> {
         Box::new((*self).clone())

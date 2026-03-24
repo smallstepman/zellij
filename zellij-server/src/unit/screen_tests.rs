@@ -51,12 +51,12 @@ use zellij_utils::{
 use crate::panes::grid::Grid;
 use crate::panes::link_handler::LinkHandler;
 use crate::panes::sixel::SixelImageStore;
+use crate::session_transfer::TransferredPane;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use zellij_utils::data::{PaneContents, PaneInfo, PaneRenderReport};
 use zellij_utils::ipc::ExitReason;
-use crate::session_transfer::TransferredPane;
 
 fn take_snapshot_and_cursor_coordinates(
     ansi_instructions: &str,
@@ -208,6 +208,22 @@ impl ServerOsApi for FakeInputOutput {
     #[cfg(unix)]
     fn terminal_raw_fd(&self, _terminal_id: u32) -> Option<RawFd> {
         None
+    }
+    #[cfg(windows)]
+    fn clone_terminal_transfer_handles(
+        &self,
+        _terminal_id: u32,
+        _target_pid: u32,
+    ) -> Result<crate::session_transfer::WindowsTransferredPtyHandles> {
+        unimplemented!()
+    }
+    #[cfg(windows)]
+    fn adopt_terminal_transfer_handles(
+        &self,
+        _terminal_id: u32,
+        _handles: crate::session_transfer::WindowsTransferredPtyHandles,
+    ) -> Result<Box<dyn AsyncReader>> {
+        unimplemented!()
     }
     fn kill(&self, _pid: u32) -> Result<()> {
         unimplemented!()
@@ -6760,12 +6776,14 @@ pub fn move_tab_to_session_works_without_connected_clients() {
     std::thread::sleep(Duration::from_millis(100));
 
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let _ = mock_screen.to_screen.send(ScreenInstruction::MoveTabToSession {
-        target_session_name: "target-session".to_owned(),
-        new_session: false,
-        client_id: mock_screen.main_client_id,
-        completion_tx: Some(crate::route::NotificationEnd::new(completion_tx)),
-    });
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::MoveTabToSession {
+            target_session_name: "target-session".to_owned(),
+            new_session: false,
+            client_id: mock_screen.main_client_id,
+            completion_tx: Some(crate::route::NotificationEnd::new(completion_tx)),
+        });
 
     let result =
         crate::route::wait_for_action_completion(completion_rx, "move-tab-to-session", true);
@@ -6800,12 +6818,14 @@ pub fn move_tab_to_session_ignores_default_plugin_panes() {
         }
     });
     let screen_thread = mock_screen.run(None, vec![]);
-    let _ = mock_screen.to_screen.send(ScreenInstruction::MoveTabToSession {
-        target_session_name: "target-session".to_owned(),
-        new_session: false,
-        client_id: mock_screen.main_client_id,
-        completion_tx: None,
-    });
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::MoveTabToSession {
+            target_session_name: "target-session".to_owned(),
+            new_session: false,
+            client_id: mock_screen.main_client_id,
+            completion_tx: None,
+        });
     pty_thread.join().unwrap();
 
     let request = captured_request
@@ -6847,6 +6867,7 @@ pub fn filter_live_terminal_panes_for_session_transfer_skips_ui_panes_and_restor
             selected_text: None,
         },
         child_pid: None,
+        windows_pty_handles: None,
     };
     let live_terminal = TransferredPane {
         pane_info: PaneInfo {
@@ -6863,6 +6884,7 @@ pub fn filter_live_terminal_panes_for_session_transfer_skips_ui_panes_and_restor
             selected_text: None,
         },
         child_pid: None,
+        windows_pty_handles: None,
     };
 
     let filtered = crate::screen::filter_live_terminal_panes_for_session_transfer(vec![
@@ -6920,8 +6942,11 @@ pub fn close_tab_without_pty_closes_tab_shell_without_reclosing_terminals() {
     let pty_events = Arc::new(Mutex::new(vec![]));
     let server_events = Arc::new(Mutex::new(vec![]));
     let pty_thread = log_actions_in_thread!(pty_events, PtyInstruction::Exit, pty_receiver);
-    let server_thread =
-        log_actions_in_thread!(server_events, ServerInstruction::KillSession, server_receiver);
+    let server_thread = log_actions_in_thread!(
+        server_events,
+        ServerInstruction::KillSession,
+        server_receiver
+    );
     let screen_thread = mock_screen.run(None, vec![]);
 
     std::thread::sleep(Duration::from_millis(100));
@@ -7018,7 +7043,10 @@ pub fn renaming_session_moves_session_transfer_listener_socket() {
             false
         }
     });
-    assert!(listener_started, "expected transfer listener to start before rename");
+    assert!(
+        listener_started,
+        "expected transfer listener to start before rename"
+    );
 
     let _ = mock_screen.to_screen.send(ScreenInstruction::RenameSession(
         new_session_name,

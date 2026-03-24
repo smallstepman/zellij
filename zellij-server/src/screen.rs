@@ -37,10 +37,8 @@ use std::str;
 use std::time::{Duration, Instant};
 
 use crate::route::{wait_for_action_completion, NotificationEnd};
-#[cfg(unix)]
 use crate::session_transfer::{
-    bind_session_transfer_socket, recv_request_with_fds, send_response,
-    SessionTransferResponse,
+    bind_session_transfer_socket, recv_request_with_fds, send_response, SessionTransferResponse,
 };
 use crate::session_transfer::{SessionTransferRequest, TransferKind, TransferredPane};
 
@@ -4751,7 +4749,6 @@ fn find_already_running_panes(
     (tiled_to_ignore, floating_indices)
 }
 
-#[cfg(unix)]
 fn start_session_transfer_listener(
     session_transfer_listener_started: &mut bool,
     session_name: String,
@@ -4788,7 +4785,7 @@ fn start_session_transfer_listener(
                 },
             };
 
-            let (request, raw_fds) = match recv_request_with_fds(&stream) {
+            let (request, raw_fds) = match recv_request_with_fds(&mut stream) {
                 Ok(request) => request,
                 Err(err) => {
                     let _ = send_response(
@@ -4857,7 +4854,10 @@ pub(crate) fn filter_live_terminal_panes_for_session_transfer(
             && !pane.pane_info.exited
             && !pane.pane_info.is_held
     });
-    if !transferred_panes.iter().any(|pane| pane.pane_info.is_focused) {
+    if !transferred_panes
+        .iter()
+        .any(|pane| pane.pane_info.is_focused)
+    {
         if let Some(first_live_terminal) = transferred_panes.first_mut() {
             first_live_terminal.pane_info.is_focused = true;
         }
@@ -6235,7 +6235,6 @@ pub(crate) fn screen_thread_main(
                     tab_name.clone(),
                     client_id_for_new_tab,
                 )?;
-                #[cfg(unix)]
                 if !session_transfer_listener_started {
                     start_session_transfer_listener(
                         &mut session_transfer_listener_started,
@@ -6594,7 +6593,6 @@ pub(crate) fn screen_thread_main(
                 pane_id_to_focus,
             ) => {
                 screen.add_client(client_id, is_web_client)?;
-                #[cfg(unix)]
                 if !session_transfer_listener_started {
                     start_session_transfer_listener(
                         &mut session_transfer_listener_started,
@@ -7682,6 +7680,7 @@ pub(crate) fn screen_thread_main(
                             invoked_with: pane.invoked_with().clone(),
                             pane_contents: pane.pane_contents_with_ansi(None, true, None),
                             child_pid: None,
+                            windows_pty_handles: None,
                         });
                         break;
                     }
@@ -7758,22 +7757,26 @@ pub(crate) fn screen_thread_main(
                         }
                     })
                     .or_else(|| screen.tabs.keys().next().copied());
-                let focused_pane_id = source_client_id
-                    .and_then(|client_id| screen.get_active_tab(client_id).ok().and_then(|tab| tab.get_active_pane_id(client_id)));
+                let focused_pane_id = source_client_id.and_then(|client_id| {
+                    screen
+                        .get_active_tab(client_id)
+                        .ok()
+                        .and_then(|tab| tab.get_active_pane_id(client_id))
+                });
                 let empty_pane_group: HashMap<ClientId, Vec<PaneId>> = HashMap::new();
                 let transferred_panes = {
-                    let active_tab = match source_tab_id.and_then(|tab_id| screen.get_tab_by_id_mut(tab_id)) {
-                        Some(tab) => tab,
-                        None => {
-                            if let Some(completion_tx) = completion_tx.as_mut() {
-                                completion_tx.set_exit_status(1);
-                                completion_tx.set_error_message(
-                                    "Failed to find active tab".to_string(),
-                                );
-                            }
-                            return Ok(());
-                        },
-                    };
+                    let active_tab =
+                        match source_tab_id.and_then(|tab_id| screen.get_tab_by_id_mut(tab_id)) {
+                            Some(tab) => tab,
+                            None => {
+                                if let Some(completion_tx) = completion_tx.as_mut() {
+                                    completion_tx.set_exit_status(1);
+                                    completion_tx
+                                        .set_error_message("Failed to find active tab".to_string());
+                                }
+                                return Ok(());
+                            },
+                        };
                     let mut transferred_panes = vec![];
                     for pane_id in active_tab.get_all_pane_ids() {
                         if let Some(pane) = active_tab.get_pane_with_id_mut(pane_id) {
@@ -7785,6 +7788,7 @@ pub(crate) fn screen_thread_main(
                                 invoked_with: pane.invoked_with().clone(),
                                 pane_contents: pane.pane_contents_with_ansi(None, true, None),
                                 child_pid: None,
+                                windows_pty_handles: None,
                             });
                         }
                     }
@@ -8012,8 +8016,7 @@ pub(crate) fn screen_thread_main(
 
                     let old_transfer_socket_file_path =
                         session_transfer_socket_file_name(&old_session_name);
-                    let new_transfer_socket_file_path =
-                        session_transfer_socket_file_name(&name);
+                    let new_transfer_socket_file_path = session_transfer_socket_file_name(&name);
                     if let Err(e) = std::fs::rename(
                         old_transfer_socket_file_path,
                         new_transfer_socket_file_path,

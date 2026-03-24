@@ -8,9 +8,9 @@ use crate::{
     plugins::PluginInstruction, thread_bus::ThreadSenders, ClientId,
 };
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use zellij_utils::channels::Receiver;
@@ -87,6 +87,22 @@ impl ServerOsApi for FakeInputOutput {
     #[cfg(unix)]
     fn terminal_raw_fd(&self, _terminal_id: u32) -> Option<RawFd> {
         None
+    }
+    #[cfg(windows)]
+    fn clone_terminal_transfer_handles(
+        &self,
+        _terminal_id: u32,
+        _target_pid: u32,
+    ) -> Result<crate::session_transfer::WindowsTransferredPtyHandles> {
+        unimplemented!()
+    }
+    #[cfg(windows)]
+    fn adopt_terminal_transfer_handles(
+        &self,
+        _terminal_id: u32,
+        _handles: crate::session_transfer::WindowsTransferredPtyHandles,
+    ) -> Result<Box<dyn AsyncReader>> {
+        unimplemented!()
     }
     fn kill(&self, _pid: u32) -> Result<()> {
         unimplemented!()

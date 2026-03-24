@@ -31,10 +31,10 @@ use zellij_utils::{
         keybinds::Keybinds,
         layout::Layout,
     },
-    sessions::generate_unique_session_name,
     ipc::{
         ClientAttributes, ClientToServerMsg, ExitReason, IpcReceiverWithContext, ServerToClientMsg,
     },
+    sessions::generate_unique_session_name,
 };
 
 use crate::ClientId;
@@ -437,8 +437,8 @@ pub(crate) fn route_action(
                 .map(Into::into)
                 .or(pane_id)
                 .with_context(|| {
-                "failed to move pane to tab: missing target pane id".to_string()
-            })?;
+                    "failed to move pane to tab: missing target pane id".to_string()
+                })?;
             let notification_end = Some(NotificationEnd::new(completion_tx));
             match tab_id {
                 Some(id) => {
@@ -3229,8 +3229,7 @@ mod tests {
         assert!(cloned.channel.is_none());
     }
 
-    fn thread_senders_with_screen_receiver(
-    ) -> (
+    fn thread_senders_with_screen_receiver() -> (
         ThreadSenders,
         channels::Receiver<(ScreenInstruction, zellij_utils::errors::ErrorContext)>,
     ) {

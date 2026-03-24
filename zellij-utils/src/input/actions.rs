@@ -867,10 +867,14 @@ impl Action {
                 };
                 if new_session {
                     if target_session_name.is_some() || tab_id.is_some() {
-                        return Err("new-session cannot be combined with session-name or tab-id".into());
+                        return Err(
+                            "new-session cannot be combined with session-name or tab-id".into()
+                        );
                     }
                 } else if target_session_name.is_none() || tab_id.is_none() {
-                    return Err("session-name and tab-id are required unless new-session is set".into());
+                    return Err(
+                        "session-name and tab-id are required unless new-session is set".into(),
+                    );
                 }
                 Ok(vec![Action::MovePaneToSession {
                     pane_id,

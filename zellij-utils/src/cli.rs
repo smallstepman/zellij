@@ -771,7 +771,12 @@ pub enum CliAction {
         )]
         new_tab: bool,
         /// Move the pane to an existing tab by stable tab ID
-        #[clap(long, value_parser, conflicts_with("new-tab"), required_unless_present("new-tab"))]
+        #[clap(
+            long,
+            value_parser,
+            conflicts_with("new-tab"),
+            required_unless_present("new-tab")
+        )]
         tab_id: Option<usize>,
         /// Name the destination tab when creating a new tab
         #[clap(long, value_parser, requires("new-tab"))]
@@ -1655,7 +1660,10 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let borrowed_args = owned_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
+                let borrowed_args = owned_args
+                    .iter()
+                    .map(|arg| arg.as_str())
+                    .collect::<Vec<_>>();
                 parse_action(&borrowed_args)
             })
             .unwrap()

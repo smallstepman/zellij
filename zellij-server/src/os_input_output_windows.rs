@@ -1,5 +1,6 @@
 use crate::os_input_output::{resolve_command, AsyncReader};
 use crate::panes::PaneId;
+use crate::session_transfer::WindowsTransferredPtyHandles;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -26,10 +27,12 @@ use windows_sys::Win32::System::Console::{
 };
 use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, CreatePipe};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, OpenProcess, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
-    PROCESS_INFORMATION, PROCESS_TERMINATE, STARTUPINFOEXW, STARTUPINFOW,
+    CreateProcessW, DeleteProcThreadAttributeList, DuplicateHandle, GetCurrentProcess,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcess, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
+    DUPLICATE_SAME_ACCESS, EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_DUP_HANDLE,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    STARTUPINFOEXW, STARTUPINFOW,
 };
 
 use zellij_utils::{errors::prelude::*, input::command::RunCommand};
@@ -53,6 +56,7 @@ static PIPE_SEQ: AtomicU64 = AtomicU64::new(0);
 struct ConPtyTerminal {
     hpcon: HPCON,
     input_write_handle: HANDLE,
+    output_read_handle: HANDLE,
 }
 
 // HANDLE/HPCON are isize (plain integers), safe to send across threads.
@@ -67,6 +71,7 @@ impl Drop for ConPtyTerminal {
             // drain it. Then close the remaining handle.
             ClosePseudoConsole(self.hpcon);
             CloseHandle(self.input_write_handle);
+            CloseHandle(self.output_read_handle);
         }
     }
 }
@@ -93,6 +98,11 @@ impl ConPtyAsyncReader {
             pipe: None,
         }
     }
+}
+
+pub(crate) fn async_reader_from_raw_handle(handle: HANDLE) -> Result<Box<dyn AsyncReader>> {
+    let owned = unsafe { OwnedHandle::from_raw_handle(handle as *mut core::ffi::c_void) };
+    Ok(Box::new(ConPtyAsyncReader::new(owned)))
 }
 
 #[async_trait]
@@ -362,6 +372,59 @@ fn terminate_process(pid: u32) -> std::result::Result<(), std::io::Error> {
     Ok(())
 }
 
+fn duplicate_handle_to_process(handle: HANDLE, target_process: HANDLE) -> io::Result<HANDLE> {
+    let mut duplicated: HANDLE = 0;
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            target_process,
+            &mut duplicated,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(duplicated)
+    }
+}
+
+fn duplicate_handle_for_current_process(handle: HANDLE) -> io::Result<HANDLE> {
+    duplicate_handle_to_process(handle, unsafe { GetCurrentProcess() })
+}
+
+pub(crate) fn spawn_exit_monitor(
+    terminal_id: u32,
+    child_pid: u32,
+    quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+    cmd: RunCommand,
+) -> io::Result<()> {
+    let process_handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+            0,
+            child_pid,
+        )
+    };
+    if process_handle == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    std::thread::spawn(move || {
+        let exit_code = unsafe {
+            WaitForSingleObject(process_handle, INFINITE);
+            let mut code: u32 = 0;
+            GetExitCodeProcess(process_handle, &mut code);
+            CloseHandle(process_handle);
+            code
+        };
+        quit_cb(PaneId::Terminal(terminal_id), Some(exit_code as i32), cmd);
+    });
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // WindowsPtyBackend
 // ---------------------------------------------------------------------------
@@ -446,11 +509,14 @@ impl WindowsPtyBackend {
         unsafe { CloseHandle(thread_handle) };
 
         // 6. Store per-terminal state
+        let output_read_for_transfer =
+            duplicate_handle_for_current_process(output_read).with_context(|| err_context(&cmd))?;
         self.terminals.lock().unwrap().insert(
             terminal_id,
             Some(ConPtyTerminal {
                 hpcon,
                 input_write_handle: input_write,
+                output_read_handle: output_read_for_transfer,
             }),
         );
 
@@ -472,8 +538,8 @@ impl WindowsPtyBackend {
         });
 
         // 8. Wrap the output read handle in an async reader
-        let owned = unsafe { OwnedHandle::from_raw_handle(output_read as *mut core::ffi::c_void) };
-        let reader = Box::new(ConPtyAsyncReader::new(owned)) as Box<dyn AsyncReader>;
+        let reader = async_reader_from_raw_handle(output_read)
+            .map_err(|e| anyhow::anyhow!("failed to create ConPTY async reader: {e}"))?;
 
         Ok((reader, child_pid))
     }
@@ -623,6 +689,69 @@ impl WindowsPtyBackend {
                 .with_context(|| format!("failed to send SIGINT to pid {}", pid))?;
             Ok(())
         }
+    }
+
+    pub fn clone_terminal_transfer_handles(
+        &self,
+        terminal_id: u32,
+        target_pid: u32,
+    ) -> Result<WindowsTransferredPtyHandles> {
+        let err_context = || {
+            format!(
+                "failed to duplicate ConPTY handles for terminal {} into process {}",
+                terminal_id, target_pid
+            )
+        };
+        let target_process = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, target_pid) };
+        if target_process == 0 {
+            return Err(io::Error::last_os_error()).with_context(err_context);
+        }
+        let duplicated = (|| -> io::Result<WindowsTransferredPtyHandles> {
+            let terminals = self.terminals.lock().unwrap();
+            let terminal = terminals
+                .get(&terminal_id)
+                .and_then(|terminal| terminal.as_ref())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "terminal not found"))?;
+            let conpty_handle = duplicate_handle_to_process(terminal.hpcon, target_process)? as u64;
+            let input_write_handle =
+                duplicate_handle_to_process(terminal.input_write_handle, target_process)? as u64;
+            let output_read_handle =
+                duplicate_handle_to_process(terminal.output_read_handle, target_process)? as u64;
+            Ok(WindowsTransferredPtyHandles {
+                conpty_handle,
+                input_write_handle,
+                output_read_handle,
+            })
+        })();
+        unsafe { CloseHandle(target_process) };
+        duplicated.with_context(err_context)
+    }
+
+    pub fn adopt_terminal_transfer_handles(
+        &self,
+        terminal_id: u32,
+        handles: WindowsTransferredPtyHandles,
+    ) -> Result<Box<dyn AsyncReader>> {
+        let err_context = || {
+            format!(
+                "failed to adopt transferred ConPTY handles for terminal {}",
+                terminal_id
+            )
+        };
+        let output_read_handle = handles.output_read_handle as HANDLE;
+        let output_read_for_transfer =
+            duplicate_handle_for_current_process(output_read_handle).with_context(err_context)?;
+        self.terminals.lock().unwrap().insert(
+            terminal_id,
+            Some(ConPtyTerminal {
+                hpcon: handles.conpty_handle as HPCON,
+                input_write_handle: handles.input_write_handle as HANDLE,
+                output_read_handle: output_read_for_transfer,
+            }),
+        );
+        async_reader_from_raw_handle(output_read_handle)
+            .map_err(|e| anyhow::anyhow!("failed to adopt transferred ConPTY reader: {e}"))
+            .with_context(err_context)
     }
 
     pub fn reserve_terminal_id(&self, terminal_id: u32) {

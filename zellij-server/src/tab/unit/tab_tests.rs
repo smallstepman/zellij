@@ -14,9 +14,9 @@ use zellij_utils::pane_size::{Size, SizeInPixels};
 use crate::os_input_output::AsyncReader;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
+use std::rc::Rc;
 
 use interprocess::local_socket::Stream as LocalSocketStream;
 use zellij_utils::{
@@ -59,6 +59,22 @@ impl ServerOsApi for FakeInputOutput {
     #[cfg(unix)]
     fn terminal_raw_fd(&self, _terminal_id: u32) -> Option<RawFd> {
         None
+    }
+    #[cfg(windows)]
+    fn clone_terminal_transfer_handles(
+        &self,
+        _terminal_id: u32,
+        _target_pid: u32,
+    ) -> Result<crate::session_transfer::WindowsTransferredPtyHandles> {
+        unimplemented!()
+    }
+    #[cfg(windows)]
+    fn adopt_terminal_transfer_handles(
+        &self,
+        _terminal_id: u32,
+        _handles: crate::session_transfer::WindowsTransferredPtyHandles,
+    ) -> Result<Box<dyn AsyncReader>> {
+        unimplemented!()
     }
     fn kill(&self, _pid: u32) -> Result<()> {
         unimplemented!()
